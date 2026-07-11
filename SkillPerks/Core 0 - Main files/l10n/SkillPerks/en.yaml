@@ -1,0 +1,6 @@
+name: "SkillPerks"
+settings: "Settings"
+disableName: "Disable Mod"
+disableDescription: "Disable all SkillPerks perks."
+enableLoggingName: "Verbose Logging"
+enableLoggingDescription: "Print detailed debug information to the console. Intended for testing, not normal play."
