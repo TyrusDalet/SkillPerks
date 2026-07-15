@@ -1,5 +1,0 @@
-# SkillPerks - Core 1 (Combat)
-# Requires ErnPerkFramework.omwscripts, IE.omwscripts (Inventory Extender),
-# and SkillPerks Core 0 to be loaded BEFORE this file.
-
-PLAYER:scripts/SkillPerks/Combat/SPerks_Athletics.lua
