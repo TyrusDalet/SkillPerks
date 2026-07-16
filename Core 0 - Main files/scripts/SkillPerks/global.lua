@@ -53,6 +53,15 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
         condition loss to a supplied item object. Covers: Block B1 and
         future armor/weapon durability perks.
 
+    SPerks_ModifyItemCondition
+        Global-only item condition write helper for player scripts that
+        need to add, subtract, or set condition on carried/equipped items.
+
+    SPerks_RemoveItem
+        Removes a supplied item object. Used when a perk temporarily keeps an
+        item alive long enough to decide whether vanilla durability loss
+        should really destroy it.
+
     SPerks_ModifyActorActiveEffect
         Actor.activeEffects writes are global/self-scoped. Applies a flat
         active effect delta to an arbitrary actor. Covers: Block B2 and
@@ -194,6 +203,44 @@ local function damageItemCondition(data)
     end
 end
 
+--- Adds to or sets an item's condition from a global script.
+--- @param data table { item = GameObject, amount = number|nil, value = number|nil, maxCondition = number|nil, minCondition = number|nil }
+local function modifyItemCondition(data)
+    data = data or {}
+    if not data.item or not data.item:isValid() then
+        return
+    end
+
+    local itemData = types.Item.itemData(data.item)
+    if not itemData or itemData.condition == nil then
+        return
+    end
+
+    local newCondition
+    if data.value ~= nil then
+        newCondition = data.value
+    else
+        newCondition = itemData.condition + (data.amount or 0)
+    end
+    if data.minCondition ~= false then
+        newCondition = math.max(data.minCondition or 0, newCondition)
+    end
+    if data.maxCondition then
+        newCondition = math.min(data.maxCondition, newCondition)
+    end
+    itemData.condition = newCondition
+end
+
+--- Removes an item object from the world/inventory.
+--- @param data table { item = GameObject, count = number|nil }
+local function removeItem(data)
+    data = data or {}
+    if not data.item or not data.item:isValid() then
+        return
+    end
+    data.item:remove(data.count or 1)
+end
+
 --- Applies a flat active-effect delta to an arbitrary actor.
 --- @param data table { target = GameObject, effectId = string, amount = number, extraParam = any|nil }
 local function modifyActorActiveEffect(data)
@@ -249,6 +296,8 @@ return {
         SPerks_CreateAndApplySpell = createAndApplySpell,
         SPerks_DuplicateItem = duplicateItem,
         SPerks_DamageItemCondition = damageItemCondition,
+        SPerks_ModifyItemCondition = modifyItemCondition,
+        SPerks_RemoveItem = removeItem,
         SPerks_ModifyActorActiveEffect = modifyActorActiveEffect,
         SPerks_ApplyExistingSpell = applyExistingSpell,
 
