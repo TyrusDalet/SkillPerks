@@ -1,0 +1,8 @@
+Copyright (C) 2026 Robbie Barker - SkillPerks design and implementation
+
+Depends on ErnPerkFramework (Copyright (C) 2025 Erin Pentecost) for the perk registration/UI framework.
+Requires Inventory Extender as a hard dependency.
+
+Charge detection technique in shared/combat_math.lua and the stagger/knockdown
+technique in shared/stagger.lua are independent reimplementations of methods
+sourced from N'Garde by Arrean. N'Garde is not a required dependency.
