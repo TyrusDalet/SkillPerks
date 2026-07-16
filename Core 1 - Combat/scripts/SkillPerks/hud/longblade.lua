@@ -95,14 +95,7 @@ local function renderMomentumBar(state)
     }
 end
 
-local function renderStateLine(state)
-    local text = "Poise: " .. (state.poise and "Active" or "Building")
-    if state.overdrive and state.overdrive > 0 then
-        text = ("Killing Measure: %.0fs"):format(math.ceil(state.overdrive))
-    elseif (state.current or 0) <= 0 then
-        text = "Momentum: Ready"
-    end
-
+local function renderStateText(text)
     return {
         type = ui.TYPE.Text,
         props = {
@@ -110,6 +103,25 @@ local function renderStateLine(state)
             textColor = TEXT_COLOR,
             textSize = 14,
         },
+    }
+end
+
+local function renderStateLines(state)
+    local content = {
+        renderStateText((state.current or 0) <= 0
+            and "Momentum: Ready"
+            or ("Poise: " .. (state.poise and "Active" or "Building"))),
+    }
+    if state.overdrive and state.overdrive > 0 then
+        table.insert(content, renderStateText(("Killing Measure: %.0fs"):format(math.ceil(state.overdrive))))
+    end
+
+    return {
+        type = ui.TYPE.Flex,
+        props = {
+            arrange = ui.ALIGNMENT.Center,
+        },
+        content = ui.content(content),
     }
 end
 
@@ -149,7 +161,7 @@ local function buildLayout(state)
                             },
                             renderMomentumBar(state),
                             interval,
-                            renderStateLine(state),
+                            renderStateLines(state),
                         }),
                     },
                 }),

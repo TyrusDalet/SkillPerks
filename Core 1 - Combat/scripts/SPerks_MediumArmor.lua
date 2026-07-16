@@ -304,6 +304,22 @@ local function handleHitReceived(attack)
     end
 end
 
+-- Medium Armor is purely defensive. The framework hit callback fires for
+-- player attacks too, so reject outgoing swings before cooldown, refund, or
+-- D-chain recovery logic can treat them as hits received.
+local function isIncomingAttackAgainstPlayer(attack)
+    if not attack.attacker or not attack.attacker:isValid() then
+        return false
+    end
+    if attack.attacker == self then
+        return false
+    end
+    if attack.target and attack.target ~= self then
+        return false
+    end
+    return true
+end
+
 -- Registers Medium Armor's reactive effects with the framework hit pipeline.
 interfaces.ErnPerkFramework.registerOnHitHandler({
     id = ns .. "_mediumarmor_on_hit",
@@ -311,7 +327,7 @@ interfaces.ErnPerkFramework.registerOnHitHandler({
         if not anyRankOwned() then
             return
         end
-        if not attack.attacker or not attack.attacker:isValid() then
+        if not isIncomingAttackAgainstPlayer(attack) then
             return
         end
 

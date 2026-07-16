@@ -346,6 +346,10 @@ local function getBrokenPlateBonus(attack, target)
     local normalAR = CombatMath.getArmorRating(target)
     local scaledAR = CombatMath.getArmorRating(target, {
         conditionScale = getArmorConditionRatio,
+        -- OpenMW's hit table tells us the strike hit no armor, but not
+        -- which unarmored slot was struck. Until that slot is available,
+        -- D2 zeroes the unarmored contribution during this recomputation
+        -- as the closest framework-level approximation.
         zeroUnarmored = function()
             return rank >= 2 and attack.armor == nil
         end,
@@ -390,15 +394,13 @@ interfaces.ErnPerkFramework.registerCalculationHandler({
         return data.value
     end
 
-    if targetHealthRatioBeforeHit[target.id] == false then
-        return data.value
-    end
-
     local health = types.Actor.stats.dynamic.health(target)
     if data.value >= health.current then
         local beforeRatio = targetHealthRatioBeforeHit[target.id] or getHealthRatio(target)
-        targetHealthRatioBeforeHit[target.id] = false
+        targetHealthRatioBeforeHit[target.id] = nil
         triggerDemoralize(target, math.max(0, math.min(1, 0.20 + beforeRatio)))
+    else
+        targetHealthRatioBeforeHit[target.id] = nil
     end
     return data.value
 end)
@@ -430,6 +432,7 @@ interfaces.ErnPerkFramework.registerOnHitHandler({
 local function onUpdate()
     refreshBerserkIfNeeded()
     triggerBerserkIfNeeded()
+    targetHealthRatioBeforeHit = {}
 end
 
 local function onSave()
