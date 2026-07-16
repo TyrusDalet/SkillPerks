@@ -39,19 +39,25 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
         Harmless no-op overhead until a perk actually forces a stagger/
         knockdown animation on this actor.
 
-    COMBAT HIT HANDLING: deliberately NOT registered here. Combat/Stealth
-    perk files that need to react to hits should register through
-    ErnPerkFramework.registerOnHitHandler for detection/side effects, and
-    through ErnPerkFramework.registerCalculationHandler for damage-changing
-    contributions. That keeps all incoming-hit logic in the shared ordered
-    pipeline instead of installing independent OpenMW onHit callbacks.
+    COMBAT HIT HANDLING: OpenMW delivers onHit callbacks to the target's
+    local script. For player-owned perk state such as Long Blade Momentum,
+    this file forwards player outgoing hits back to the player's SkillPerks
+    scripts after the framework's target-side hit pipeline sees them.
 ]]
 
 local interfaces = require("openmw.interfaces")
 local pself = require("openmw.self")
+local types = require("openmw.types")
 
 local Stagger = require("scripts.SkillPerks.shared.stagger")
-local RESOURCE_OPERATION = interfaces.ErnPerkFramework.RESOURCE_OPERATION
+local hitForwarderRegistered = false
+
+--- Returns the framework interface after local actor interfaces have attached.
+--- NPC scripts can start before another local script's interface is visible,
+--- so this must not be resolved at file load time.
+local function framework()
+    return interfaces.ErnPerkFramework
+end
 
 --- Applies direct health damage to self through the framework resource
 --- pipeline, allowing other mods to adjust `direct.damage.health` before
@@ -59,10 +65,14 @@ local RESOURCE_OPERATION = interfaces.ErnPerkFramework.RESOURCE_OPERATION
 --- @param data table|nil Event payload with amount and optional source/context data.
 local function takeDamage(data)
     data = data or {}
-    interfaces.ErnPerkFramework.applyActorResourceDelta({
+    local fw = framework()
+    if fw == nil then
+        return
+    end
+    fw.applyActorResourceDelta({
         actor = pself,
         resource = "health",
-        operation = RESOURCE_OPERATION.Damage,
+        operation = fw.RESOURCE_OPERATION.Damage,
         amount = data.amount or 0,
         source = data.source,
         sourceEffect = data.sourceEffect,
@@ -77,10 +87,14 @@ end
 --- @param data table|nil Event payload with amount and optional source/context data.
 local function takeFatigue(data)
     data = data or {}
-    interfaces.ErnPerkFramework.applyActorResourceDelta({
+    local fw = framework()
+    if fw == nil then
+        return
+    end
+    fw.applyActorResourceDelta({
         actor = pself,
         resource = "fatigue",
-        operation = RESOURCE_OPERATION.Damage,
+        operation = fw.RESOURCE_OPERATION.Damage,
         amount = data.amount or 0,
         source = data.source,
         sourceEffect = data.sourceEffect,
@@ -89,7 +103,42 @@ local function takeFatigue(data)
     })
 end
 
+--- Registers a target-side onHit bridge once the framework actor interface
+--- exists. The forwarded payload is intentionally small and serializable:
+--- player scripts only need hit metadata and object references, not the live
+--- mutable attack table.
+local function registerPlayerHitForwarder()
+    if hitForwarderRegistered then
+        return
+    end
+    if interfaces.Combat == nil then
+        return
+    end
+    hitForwarderRegistered = true
+    interfaces.Combat.addOnHitHandler(function(attack)
+        local attacker = attack.attacker
+        if not attacker or not attacker:isValid() or not types.Player.objectIsInstance(attacker) then
+            return
+        end
+        attacker:sendEvent("SPerks_PlayerHitActor", {
+            target = pself,
+            weapon = attack.weapon,
+            armor = attack.armor,
+            successful = attack.successful,
+            strength = attack.strength,
+            sourceType = attack.sourceType,
+            type = attack.type,
+            damage = attack.damage and {
+                health = attack.damage.health,
+                fatigue = attack.damage.fatigue,
+                magicka = attack.damage.magicka,
+            } or nil,
+        })
+    end)
+end
+
 local function onUpdate(dt)
+    registerPlayerHitForwarder()
     Stagger.checkStaggerState()
 end
 

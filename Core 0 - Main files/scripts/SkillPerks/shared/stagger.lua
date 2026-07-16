@@ -34,12 +34,11 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
          as a local flag, and while true, zero the target's own
          self.controls.use to suppress AI-driven attacks.
 
-    Knockdown, in contrast, IS genuine engine state - types.Actor.setKnockedDown
-    is a real setter (global scripts: any actor; local scripts: self only).
-    Forcing a real knockdown is therefore a two-part action: set the flag,
-    AND play the matching "knockdown" animation group for the visual. The
-    flag does not clear itself and must be explicitly reset once the
-    animation ends.
+    Knockdown is handled through the same animation-driven path here.
+    OpenMW exposes Actor.canMove(), which can report knocked-down actors, but
+    the current Lua API does not expose a setKnockedDown() setter. N'Garde's
+    working implementation also treats knockdown/knockout groups as stagger
+    animations and suppresses attacks while they play.
 
     THIS MODULE MUST RUN ON THE TARGET'S OWN LOCAL SCRIPT (npc.lua /
     creature.lua), since self.controls is only writable for self, per
@@ -57,14 +56,26 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
     "Outstanding flagged items").
 ]]
 
-local types = require("openmw.types")
 local anim = require("openmw.animation")
 local interfaces = require("openmw.interfaces")
 local pself = require("openmw.self")
 
 local Stagger = {}
 
-Stagger.STAGGER_ANIMATIONS = { "hit1", "hit2", "hit3", "hit4", "hit5" }
+Stagger.STAGGER_ANIMATIONS = {
+    "hit1",
+    "hit2",
+    "hit3",
+    "hit4",
+    "hit5",
+    "swimhit1",
+    "swimhit2",
+    "swimhit3",
+    "knockdown",
+    "knockout",
+    "swimknockdown",
+    "swimknockout",
+}
 
 --- Plays a forced hit-reaction (or "knockdown") animation at Scripted
 --- priority across the whole body, interrupting whatever the actor was
@@ -86,16 +97,10 @@ function Stagger.playForcedAnimation(animName)
     })
 end
 
--- Tracks whether we've already set the real knockdown flag, so it can be
--- cleared exactly once when the animation finishes (the flag does not
--- self-clear, unlike the stagger-animation check below).
-local wasKnockedDown = false
-
 --- Call this every frame (e.g. from onUpdate or a dedicated onFrame) on
 --- the TARGET's own local script. Detects whether a stagger or knockdown
 --- animation is currently playing and, if so, suppresses this actor's
---- AI-driven attacks for that frame. Also owns clearing the real
---- setKnockedDown flag once the knockdown animation finishes.
+--- AI-driven attacks for that frame.
 ---
 --- Deliberately a no-op whenever interfaces.NGardeFencer is present on
 --- this actor - see module doc comment above.
@@ -112,24 +117,15 @@ function Stagger.checkStaggerState()
         end
     end
 
-    if anim.isPlaying(pself, "knockdown") then
-        staggerPlaying = true
-        wasKnockedDown = true
-    elseif wasKnockedDown then
-        types.Actor.setKnockedDown(pself, false)
-        wasKnockedDown = false
-    end
-
     if staggerPlaying then
         pself.controls.use = 0
     end
 end
 
---- Forces a real, engine-native knockdown: sets the setKnockedDown flag
---- AND plays the matching visual. Must be called on the target's own
---- local script.
+--- Forces a knockdown-style interruption by playing the knockdown animation.
+--- The per-frame stagger check suppresses attacks while the animation plays.
+--- Must be called on the target's own local script.
 function Stagger.forceKnockdown()
-    types.Actor.setKnockedDown(pself, true)
     Stagger.playForcedAnimation("knockdown")
 end
 

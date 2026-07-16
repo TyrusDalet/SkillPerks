@@ -32,18 +32,30 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 local interfaces = require("openmw.interfaces")
 local pself = require("openmw.self")
+local types = require("openmw.types")
 
 local Stagger = require("scripts.SkillPerks.shared.stagger")
-local RESOURCE_OPERATION = interfaces.ErnPerkFramework.RESOURCE_OPERATION
+local hitForwarderRegistered = false
+
+--- Returns the framework interface after local actor interfaces have attached.
+--- Creature scripts can start before another local script's interface is visible,
+--- so this must not be resolved at file load time.
+local function framework()
+    return interfaces.ErnPerkFramework
+end
 
 --- Applies direct health damage through `direct.damage.health`.
 --- @param data table|nil Event payload with amount and optional source/context data.
 local function takeDamage(data)
     data = data or {}
-    interfaces.ErnPerkFramework.applyActorResourceDelta({
+    local fw = framework()
+    if fw == nil then
+        return
+    end
+    fw.applyActorResourceDelta({
         actor = pself,
         resource = "health",
-        operation = RESOURCE_OPERATION.Damage,
+        operation = fw.RESOURCE_OPERATION.Damage,
         amount = data.amount or 0,
         source = data.source,
         sourceEffect = data.sourceEffect,
@@ -56,10 +68,14 @@ end
 --- @param data table|nil Event payload with amount and optional source/context data.
 local function takeFatigue(data)
     data = data or {}
-    interfaces.ErnPerkFramework.applyActorResourceDelta({
+    local fw = framework()
+    if fw == nil then
+        return
+    end
+    fw.applyActorResourceDelta({
         actor = pself,
         resource = "fatigue",
-        operation = RESOURCE_OPERATION.Damage,
+        operation = fw.RESOURCE_OPERATION.Damage,
         amount = data.amount or 0,
         source = data.source,
         sourceEffect = data.sourceEffect,
@@ -68,7 +84,41 @@ local function takeFatigue(data)
     })
 end
 
+--- Bridges target-local player hit callbacks back to the player's SkillPerks
+--- scripts. OpenMW sends this callback to the actor being hit, but player
+--- perks own state such as Long Blade Momentum on the player script.
+local function registerPlayerHitForwarder()
+    if hitForwarderRegistered then
+        return
+    end
+    if interfaces.Combat == nil then
+        return
+    end
+    hitForwarderRegistered = true
+    interfaces.Combat.addOnHitHandler(function(attack)
+        local attacker = attack.attacker
+        if not attacker or not attacker:isValid() or not types.Player.objectIsInstance(attacker) then
+            return
+        end
+        attacker:sendEvent("SPerks_PlayerHitActor", {
+            target = pself,
+            weapon = attack.weapon,
+            armor = attack.armor,
+            successful = attack.successful,
+            strength = attack.strength,
+            sourceType = attack.sourceType,
+            type = attack.type,
+            damage = attack.damage and {
+                health = attack.damage.health,
+                fatigue = attack.damage.fatigue,
+                magicka = attack.damage.magicka,
+            } or nil,
+        })
+    end)
+end
+
 local function onUpdate(dt)
+    registerPlayerHitForwarder()
     Stagger.checkStaggerState()
 end
 
