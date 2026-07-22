@@ -1,0 +1,13 @@
+# SkillPerks - Core 2 (Stealth)
+# Requires ErnPerkFramework.omwscripts, IE.omwscripts (Inventory Extender),
+# SkillPerks Core 0, and SkillPerks Core 1 to be loaded BEFORE this file.
+
+PLAYER:scripts/SPerks_Acrobatics.lua
+PLAYER:scripts/SPerks_HandToHand.lua
+PLAYER:scripts/SPerks_LightArmor.lua
+PLAYER:scripts/SPerks_Marksman.lua
+PLAYER:scripts/SPerks_Mercantile.lua
+PLAYER:scripts/SPerks_Security.lua
+PLAYER:scripts/SPerks_ShortBlade.lua
+PLAYER:scripts/SPerks_Sneak.lua
+PLAYER:scripts/SPerks_Speechcraft.lua
