@@ -31,6 +31,7 @@ local ns         = require("scripts.SkillPerks.namespace")
 local interfaces = require("openmw.interfaces")
 local types      = require("openmw.types")
 local self       = require("openmw.self")
+local core       = require("openmw.core")
 
 local StatTracker = require("scripts.SkillPerks.shared.stat_tracker")
 local ChainRequirements = require("scripts.SkillPerks.shared.chain_requirements")
@@ -228,6 +229,29 @@ end
 --  C CHAIN - DURABILITY REFUND
 -- ============================================================
 
+local OVERREPAIR_CLAMP_MIN_LOSS = 1
+
+-- OpenMW can clamp over-repaired armor to base max when condition damage
+-- lands. Preserve the over-repair buffer and only count visible damage.
+local function sendDurabilityCorrection(item, before, current, maxCond, reductionPct)
+    if before > maxCond and current <= maxCond then
+        local visibleLoss = math.max(0, maxCond - current)
+        local estimatedLoss = math.max(OVERREPAIR_CLAMP_MIN_LOSS, visibleLoss)
+        core.sendGlobalEvent("SPerks_ModifyItemCondition", {
+            item = item,
+            value = before - (estimatedLoss * (1 - reductionPct)),
+            maxCondition = before,
+        })
+        return
+    end
+
+    core.sendGlobalEvent("SPerks_ModifyItemCondition", {
+        item = item,
+        amount = (before - current) * reductionPct,
+        maxCondition = before,
+    })
+end
+
 -- Records an armor piece at the moment of impact so damage can be refunded.
 local function queueDurabilityRefund(item)
     if not item or not item:isValid() then
@@ -255,10 +279,11 @@ local function tickDurabilityRefunds(dt)
             if entry.item:isValid() and entry.before ~= nil then
                 local itemData = types.Item.itemData(entry.item)
                 local record = types.Armor.record(entry.item)
-                local lost = entry.before - (itemData.condition or entry.before)
-                if lost > 0 then
-                    local refund = lost * entry.reductionPct
-                    itemData.condition = math.min(record.health, itemData.condition + refund)
+                local current = itemData.condition or entry.before
+                local maxCond = record.health or record.maxCondition
+                local lost = entry.before - current
+                if lost > 0 and maxCond then
+                    sendDurabilityCorrection(entry.item, entry.before, current, maxCond, entry.reductionPct)
                 end
             end
             table.remove(pendingDurabilityRefunds, i)

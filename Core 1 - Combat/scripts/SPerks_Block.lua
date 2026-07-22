@@ -166,6 +166,27 @@ local function handleIronGuard()
     })
 end
 
+local OVERREPAIR_CLAMP_MIN_LOSS = 1
+
+local function sendBlockConditionCorrection(item, before, current, maxCond, reduction)
+    if before > maxCond and current <= maxCond then
+        local visibleLoss = math.max(0, maxCond - current)
+        local estimatedLoss = math.max(OVERREPAIR_CLAMP_MIN_LOSS, visibleLoss)
+        core.sendGlobalEvent("SPerks_ModifyItemCondition", {
+            item = item,
+            value = before - (estimatedLoss * (1 - reduction)),
+            maxCondition = before,
+        })
+        return
+    end
+
+    core.sendGlobalEvent("SPerks_ModifyItemCondition", {
+        item = item,
+        amount = (before - current) * reduction,
+        maxCondition = before,
+    })
+end
+
 local function tickBlockRefunds(dt)
     for i = #pendingBlockRefunds, 1, -1 do
         local entry = pendingBlockRefunds[i]
@@ -175,9 +196,10 @@ local function tickBlockRefunds(dt)
                 local itemData = types.Item.itemData(entry.item)
                 local record = entry.item.type.record(entry.item)
                 local maxCond = record.health or record.maxCondition
-                local lost = entry.before - (itemData.condition or entry.before)
+                local current = itemData.condition or entry.before
+                local lost = entry.before - current
                 if lost > 0 and maxCond then
-                    itemData.condition = math.min(maxCond, itemData.condition + lost * entry.reduction)
+                    sendBlockConditionCorrection(entry.item, entry.before, current, maxCond, entry.reduction)
                 end
             end
             table.remove(pendingBlockRefunds, i)
@@ -261,6 +283,24 @@ local spellCaptured = false
 local storedSpellId = nil
 local cLastFireTime = -math.huge
 
+local function getMagicEffectRecord(effectParams)
+    if type(effectParams) ~= "table" then
+        return nil
+    end
+    if effectParams.effect then
+        return effectParams.effect
+    end
+    if effectParams.id then
+        return core.magic.effects.records[effectParams.id]
+    end
+    return nil
+end
+
+local function effectParamsAreHarmful(effectParams)
+    local effect = getMagicEffectRecord(effectParams)
+    return effect and effect.harmful == true
+end
+
 local function pollForSpellCapture()
     if spellCaptured or getCRank() == 0 then
         return
@@ -268,9 +308,9 @@ local function pollForSpellCapture()
     for _, spell in pairs(types.Actor.activeSpells(self)) do
         local allHarmfulSelf = true
         local hasEffects = false
-        for _, effectParams in ipairs(spell.effects) do
+        for _, effectParams in ipairs(spell.effects or {}) do
             hasEffects = true
-            if not effectParams.effect.harmful or effectParams.range ~= core.magic.RANGE.Self then
+            if not effectParamsAreHarmful(effectParams) or effectParams.range ~= core.magic.RANGE.Self then
                 allHarmfulSelf = false
                 break
             end
@@ -457,11 +497,14 @@ local function pollForHarmfulSpells()
     end
     local currentIds = {}
     for _, spell in pairs(types.Actor.activeSpells(self)) do
-        currentIds[spell.activeSpellId] = true
-        if not knownActiveSpellIds[spell.activeSpellId] then
+        local activeSpellId = spell.activeSpellId
+        if activeSpellId then
+            currentIds[activeSpellId] = true
+        end
+        if activeSpellId and not knownActiveSpellIds[activeSpellId] then
             local isHarmful = false
-            for _, effectParams in ipairs(spell.effects) do
-                if effectParams.effect.harmful then
+            for _, effectParams in ipairs(spell.effects or {}) do
+                if effectParamsAreHarmful(effectParams) then
                     isHarmful = true
                     break
                 end

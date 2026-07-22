@@ -73,23 +73,61 @@ local function hasPerk(id)
 end
 
 local function isMoving()
-    return self.controls.movement ~= 0 or self.controls.sideMovement ~= 0
+    return (self.controls.movement or 0) ~= 0 or (self.controls.sideMovement or 0) ~= 0
 end
 
 -- ============================================================
 --  TRACKERS
 --  One independent tracker per chain. Independent instances are
---  intentional, not an oversight - see shared/stat_tracker.lua's own
---  doc comment: activeEffects:modify() is additive at the engine level,
---  so multiple trackers can safely target the same underlying effect id
---  (e.g. both C and D chains contribute to "fortifyattribute:speed")
---  without stepping on each other's bookkeeping.
+--  intentional, not an oversight. Speed/Agility bonuses are real
+--  stat.modifier writes because OpenMW's own docs note that
+--  Fortify Attribute active effects do not change the stat by themselves.
+--  Display is handled through ErnPerkFramework's external modifier report.
 -- ============================================================
 
-local aTracker = StatTracker.newStatModTracker(self)      -- A: Fortify Fatigue (dynamic stat)
-local bTracker = StatTracker.newActiveEffectTracker(self)  -- B: Feather
-local cTracker = StatTracker.newActiveEffectTracker(self)   -- C: Fortify Speed + Swift Swim
-local dTracker = StatTracker.newActiveEffectTracker(self)    -- D: Fortify Speed stacks + Fortify Agility
+local aTracker = StatTracker.newStatModTracker(self)       -- A: Fortify Fatigue (dynamic stat)
+local bTracker = StatTracker.newActiveEffectTracker(self)   -- B: Feather
+local cStatTracker = StatTracker.newStatModTracker(self)    -- C: Fortify Speed
+local cEffectTracker = StatTracker.newActiveEffectTracker(self) -- C: Swift Swim
+local dTracker = StatTracker.newStatModTracker(self)        -- D: Speed stacks + Agility at cap
+local legacyCTracker = StatTracker.newActiveEffectTracker(self)
+local legacyDTracker = StatTracker.newActiveEffectTracker(self)
+
+local reportedCSpeedBonus = nil
+local reportedDSpeedBonus = nil
+local reportedDAgilityBonus = nil
+
+local function reportSwiftTraveller(speedBonus)
+    if reportedCSpeedBonus == speedBonus then
+        return
+    end
+    reportedCSpeedBonus = speedBonus
+    if speedBonus > 0 then
+        interfaces.ErnPerkFramework.reportExternalModifiers("Athletics Swift Traveller", {
+            attributes = { speed = speedBonus },
+        })
+    else
+        interfaces.ErnPerkFramework.reportExternalModifiers("Athletics Swift Traveller", nil)
+    end
+end
+
+local function reportMomentum(speedBonus, agilityBonus)
+    if reportedDSpeedBonus == speedBonus and reportedDAgilityBonus == agilityBonus then
+        return
+    end
+    reportedDSpeedBonus = speedBonus
+    reportedDAgilityBonus = agilityBonus
+    if speedBonus > 0 or agilityBonus > 0 then
+        local attributes = {}
+        if speedBonus > 0 then attributes.speed = speedBonus end
+        if agilityBonus > 0 then attributes.agility = agilityBonus end
+        interfaces.ErnPerkFramework.reportExternalModifiers("Athletics Momentum", {
+            attributes = attributes,
+        })
+    else
+        interfaces.ErnPerkFramework.reportExternalModifiers("Athletics Momentum", nil)
+    end
+end
 
 -- ============================================================
 --  A CHAIN - TIRELESS
@@ -143,27 +181,37 @@ end
 -- is expressed as a continuous points/second rate, not a per-tick amount.
 local fatigueRegenAccumulator = 0
 
+local function getFatigueRegenRate(rank, currentFatigue, maxFatigue)
+    local rankData = A_RANK_DATA[rank]
+    if not rankData then
+        return 0
+    end
+    if rankData.regenMode == "flat" then
+        return rankData.flatRate
+    end
+
+    local fatiguePct = maxFatigue > 0 and math.max(0, math.min(1, currentFatigue / maxFatigue)) or 1
+    local criticalPct = 0.20
+    if fatiguePct <= criticalPct then
+        return rankData.maxRate
+    end
+    local missingScale = (1 - fatiguePct) / (1 - criticalPct)
+    return rankData.baseRate + (rankData.maxRate - rankData.baseRate) * missingScale
+end
+
 local function tickFatigueRegen(dt)
     local rank = getARank()
     if rank == 0 or not isMoving() then
         return
     end
 
-    local rankData = A_RANK_DATA[rank]
     local fatigue = types.Actor.stats.dynamic.fatigue(self)
     local maxFatigue = fatigue.base + fatigue.modifier
     if maxFatigue <= 0 or fatigue.current >= maxFatigue then
         return
     end
 
-    local rate
-    if rankData.regenMode == "flat" then
-        rate = rankData.flatRate
-    else
-        local missingPct = 1 - (fatigue.current / maxFatigue)
-        rate = rankData.baseRate + (rankData.maxRate - rankData.baseRate) * missingPct
-    end
-
+    local rate = getFatigueRegenRate(rank, fatigue.current, maxFatigue)
     fatigueRegenAccumulator = fatigueRegenAccumulator + rate * dt
     if fatigueRegenAccumulator >= 1 then
         local wholePoints = math.floor(fatigueRegenAccumulator)
@@ -235,8 +283,9 @@ end
 local function updateCStats()
     local rank = getCRank()
     if rank == 0 then
-        cTracker.apply("fortifyattribute", "speed", 0)
-        cTracker.apply("swiftswim", nil, 0)
+        cStatTracker.apply("attributes", "speed", 0)
+        cEffectTracker.apply("swiftswim", nil, 0)
+        reportSwiftTraveller(0)
         return
     end
 
@@ -246,20 +295,22 @@ local function updateCStats()
     local baseSpeed = types.Actor.stats.attributes.speed(self).base
     local speedBonus = math.floor(freePct * baseSpeed)
 
-    cTracker.apply("fortifyattribute", "speed", speedBonus)
+    cStatTracker.apply("attributes", "speed", speedBonus)
+    reportSwiftTraveller(speedBonus)
 
     if rank >= 2 then
-        cTracker.apply("swiftswim", nil, math.min(50, speedBonus))
+        cEffectTracker.apply("swiftswim", nil, math.min(50, speedBonus))
     else
-        cTracker.apply("swiftswim", nil, 0)
+        cEffectTracker.apply("swiftswim", nil, 0)
     end
 end
 
 -- Unconditional clear for onRemove - see the A chain comment above for
 -- why this can't just call updateCStats() (getCRank() is stale mid-removal).
 local function clearCStats()
-    cTracker.apply("fortifyattribute", "speed", 0)
-    cTracker.apply("swiftswim", nil, 0)
+    cStatTracker.apply("attributes", "speed", 0)
+    cEffectTracker.apply("swiftswim", nil, 0)
+    reportSwiftTraveller(0)
 end
 
 -- ============================================================
@@ -304,18 +355,23 @@ end
 local function updateDEffects()
     local rank = getDRank()
     if rank == 0 or dStackCount == 0 then
-        dTracker.apply("fortifyattribute", "speed", 0)
-        dTracker.apply("fortifyattribute", "agility", 0)
+        dTracker.apply("attributes", "speed", 0)
+        dTracker.apply("attributes", "agility", 0)
+        reportMomentum(0, 0)
         return
     end
 
-    dTracker.apply("fortifyattribute", "speed", dStackCount * D_STACK_BONUS)
+    local speedBonus = dStackCount * D_STACK_BONUS
+    local agilityBonus = 0
+    dTracker.apply("attributes", "speed", speedBonus)
 
     if rank >= 2 and dStackCount >= dStackCap(rank) then
-        dTracker.apply("fortifyattribute", "agility", D2_MAX_STACK_AGILITY_BONUS)
+        agilityBonus = D2_MAX_STACK_AGILITY_BONUS
+        dTracker.apply("attributes", "agility", agilityBonus)
     else
-        dTracker.apply("fortifyattribute", "agility", 0)
+        dTracker.apply("attributes", "agility", 0)
     end
+    reportMomentum(speedBonus, agilityBonus)
 end
 
 -- Called from D1/D2's onADD only. getDRank() reflects the finalized perk
@@ -365,7 +421,7 @@ local function tickDChain(dt)
             if dStackCount < cap then
                 dStackCount = dStackCount + 1
                 updateDEffects()
-                log("athletics_d_stack", function()
+                log(3, "athletics_d_stack", function()
                     return "SkillPerks Athletics D: gained momentum stack (" .. dStackCount .. "/" .. cap .. ")"
                 end)
             end
@@ -378,7 +434,7 @@ local function tickDChain(dt)
                 dStoppedTimer = 0
                 dStackCount = 0
                 updateDEffects()
-                log("athletics_d_stack", "SkillPerks Athletics D: momentum lost.")
+                log(3, "athletics_d_stack", "SkillPerks Athletics D: momentum lost.")
             end
         end
     end
@@ -403,7 +459,7 @@ local function tickSecondWind()
         fatigue.current = maxFatigue
         secondWindUsed = true
         ui.showMessage("Second Wind!")
-        log(nil, "SkillPerks Athletics D2: Second Wind triggered.")
+        log(1, nil, "SkillPerks Athletics D2: Second Wind triggered.")
     end
 end
 
@@ -437,8 +493,9 @@ local function onSave()
     return {
         aSnapshot = aTracker.snapshot(),
         bSnapshot = bTracker.snapshot(),
-        cSnapshot = cTracker.snapshot(),
-        dSnapshot = dTracker.snapshot(),
+        cStatSnapshot = cStatTracker.snapshot(),
+        cEffectSnapshot = cEffectTracker.snapshot(),
+        dStatSnapshot = dTracker.snapshot(),
         dStackCount = dStackCount,
         secondWindUsed = secondWindUsed,
     }
@@ -448,8 +505,13 @@ local function onLoad(data)
     data = data or {}
     aTracker.restoreAndReverse(data.aSnapshot)
     bTracker.restoreAndReverse(data.bSnapshot)
-    cTracker.restoreAndReverse(data.cSnapshot)
-    dTracker.restoreAndReverse(data.dSnapshot)
+    legacyCTracker.restoreAndReverse(data.cSnapshot)
+    legacyDTracker.restoreAndReverse(data.dEffectSnapshot or data.dSnapshot)
+    cStatTracker.restoreAndReverse(data.cStatSnapshot)
+    cEffectTracker.restoreAndReverse(data.cEffectSnapshot)
+    dTracker.restoreAndReverse(data.dStatSnapshot)
+    reportSwiftTraveller(0)
+    reportMomentum(0, 0)
 
     -- Momentum stacks deliberately do NOT persist across a reload - this
     -- is a moment-to-moment mechanic, not a banked resource (same
@@ -461,6 +523,46 @@ local function onLoad(data)
     dStoppedTimer = 0
 
     secondWindUsed = data.secondWindUsed or false
+end
+
+--- Prints Athletics debug command output to the visible in-game console.
+--- @param message any Text or value to display.
+local function consolePrint(message)
+    ui.printToConsole(tostring(message), ui.CONSOLE_COLOR.Default)
+end
+
+local function onConsoleCommand(mode, command)
+    command = tostring(command or ""):lower():match("^%s*(.-)%s*$")
+    if command ~= "luaathletics debug" and command ~= "luaath debug" then
+        return
+    end
+
+    local speed = types.Actor.stats.attributes.speed(self)
+    local agility = types.Actor.stats.attributes.agility(self)
+    local fatigue = types.Actor.stats.dynamic.fatigue(self)
+    local maxFatigue = fatigue.base + fatigue.modifier
+    local regenRate = getFatigueRegenRate(getARank(), fatigue.current, maxFatigue)
+    consolePrint("Athletics Momentum:"
+        .. " moving=" .. tostring(isMoving())
+        .. " movement=" .. tostring(self.controls.movement)
+        .. " side=" .. tostring(self.controls.sideMovement)
+        .. " D=" .. tostring(getDRank())
+        .. " stacks=" .. tostring(dStackCount)
+        .. " cap=" .. tostring(dStackCap(getDRank()))
+        .. " moveTimer=" .. tostring(dContinuousMoveTimer)
+        .. " stopTimer=" .. tostring(dStoppedTimer))
+    consolePrint("Athletics stats:"
+        .. " A=" .. tostring(getARank())
+        .. " fatigue=" .. tostring(fatigue.current)
+        .. "/" .. tostring(maxFatigue)
+        .. " regenRate=" .. tostring(regenRate)
+        .. " speed(base=" .. tostring(speed.base)
+        .. " modifier=" .. tostring(speed.modifier)
+        .. " modified=" .. tostring(speed.modified)
+        .. ") agility(base=" .. tostring(agility.base)
+        .. " modifier=" .. tostring(agility.modifier)
+        .. " modified=" .. tostring(agility.modified)
+        .. ")")
 end
 
 -- ============================================================
@@ -605,6 +707,7 @@ return {
         UiModeChanged = onUiModeChanged,
     },
     engineHandlers = {
+        onConsoleCommand = onConsoleCommand,
         onUpdate = onUpdate,
         onSave = onSave,
         onLoad = onLoad,

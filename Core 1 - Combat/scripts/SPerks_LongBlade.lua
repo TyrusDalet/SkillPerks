@@ -38,12 +38,14 @@ local core       = require("openmw.core")
 local ambient    = require("openmw.ambient")
 local animation  = require("openmw.animation")
 local async      = require("openmw.async")
+local ui         = require("openmw.ui")
 
 local ChainRequirements = require("scripts.SkillPerks.shared.chain_requirements")
 local CombatMath         = require("scripts.SkillPerks.shared.combat_math")
 local StatTracker        = require("scripts.SkillPerks.shared.stat_tracker")
 local LongBladeHud       = require("scripts.SkillPerks.hud.longblade")
 local settings           = require("scripts.SkillPerks.Settings.settings")
+local Log                = require("scripts.SkillPerks.shared.log")
 
 settings.registerLongBladeHudSettings()
 
@@ -127,11 +129,16 @@ local C_MOMENTUM_CAP = { [1] = 1, [2] = 4 }
 local momentumStacks = 0
 local momentumTimer = 0
 local momentumKind = "longblade"
+local equippedMomentumKind = nil
+local observedMomentumWeapon = false
+local observedCRank = -1
 local lastHitTime = -9999
 local overdriveTimer = 0
 local riposteCooldown = 0
 local lastHitDebug = nil
 local reportedPoiseBonus = nil
+local lastOutgoingSignature = nil
+local lastOutgoingSignatureTime = -9999
 
 local poiseTracker = StatTracker.newStatModTracker(self)
 
@@ -147,11 +154,19 @@ local function attackDealtHealthDamage(attack)
         and attack.damage.health > 0
 end
 
+local function getWeaponFromAttack(attack)
+    if attack and attack.weapon and types.Weapon.objectIsInstance(attack.weapon) then
+        return attack.weapon
+    end
+    return types.Actor.getEquipment(self, types.Actor.EQUIPMENT_SLOT.CarriedRight)
+end
+
 local function getWeaponRecord(attack)
-    if not attack.weapon or not types.Weapon.objectIsInstance(attack.weapon) then
+    local weapon = getWeaponFromAttack(attack)
+    if not weapon or not types.Weapon.objectIsInstance(weapon) then
         return nil
     end
-    return types.Weapon.record(attack.weapon)
+    return types.Weapon.record(weapon)
 end
 
 local function isLongBladeWeapon(weapon)
@@ -190,7 +205,25 @@ local function playCounterAttackAnimation(weapon)
 end
 
 local function isPlayerAttack(attack)
-    return attack.attacker == self
+    if not attack then
+        return false
+    end
+    if attack.attacker == self then
+        return true
+    end
+
+    -- Some outgoing player hit callbacks can arrive without an attacker
+    -- object. Treat those as player-owned only when the hit target is not
+    -- the player and the weapon matches the player's readied weapon.
+    if attack.attacker ~= nil then
+        return false
+    end
+    local target = getAttackTarget(attack)
+    if target == nil or target == self then
+        return false
+    end
+    local weapon = getWeaponFromAttack(attack)
+    return weapon ~= nil and types.Actor.getEquipment(self, types.Actor.EQUIPMENT_SLOT.CarriedRight) == weapon
 end
 
 local function isIncomingAttackAgainstPlayer(attack)
@@ -245,6 +278,55 @@ local function describeAttackForDebug(attack, kind)
     }
 end
 
+--- Builds a compact signature for de-duping direct and forwarded hit events.
+--- @param attack table OpenMW combat hit payload.
+--- @return string signature
+local function outgoingHitSignature(attack)
+    local weaponRecord = getWeaponRecord(attack)
+    local target = getAttackTarget(attack)
+    local health = attack.damage and attack.damage.health or nil
+    return tostring(target)
+        .. "|" .. tostring(weaponRecord and weaponRecord.id)
+        .. "|" .. tostring(attack.successful)
+        .. "|" .. tostring(attack.strength)
+        .. "|" .. tostring(health)
+end
+
+--- Returns true once for the same outgoing hit arriving through two paths.
+--- @param attack table OpenMW combat hit payload.
+--- @return boolean duplicate
+local function alreadyHandledOutgoingHit(attack)
+    local now = core.getSimulationTime()
+    local signature = outgoingHitSignature(attack)
+    if signature == lastOutgoingSignature and now - lastOutgoingSignatureTime < 0.25 then
+        return true
+    end
+    lastOutgoingSignature = signature
+    lastOutgoingSignatureTime = now
+    return false
+end
+
+--- Explains why a seen player hit did not grant Momentum.
+--- @param attack table OpenMW combat hit payload.
+--- @param kind string|nil Momentum weapon kind.
+--- @param criticalLanded boolean Whether B-chain crit logic fired.
+--- @return string|nil reason Nil means Momentum should be granted.
+local function momentumBlockReason(attack, kind, criticalLanded)
+    if not kind then
+        return "weapon not eligible"
+    end
+    if getMomentumCap(kind) <= 0 then
+        return "momentum cap is 0"
+    end
+    if attack.successful ~= true then
+        return "hit was not successful"
+    end
+    if not isChargedAttack(attack) and not criticalLanded then
+        return "hit was not charged and did not crit"
+    end
+    return nil
+end
+
 local function isAllowedMomentumWeapon(attack)
     local record = getWeaponRecord(attack)
     if not record then
@@ -289,10 +371,11 @@ getMomentumCap = function(kind)
 end
 
 local function getHudState()
+    local displayKind = equippedMomentumKind or momentumKind
     return {
-        enabled = getARank() > 0,
+        enabled = getARank() > 0 and equippedMomentumKind ~= nil,
         current = momentumStacks,
-        max = getMomentumCap(momentumKind),
+        max = getMomentumCap(displayKind),
         poise = hasPoise(),
         overdrive = overdriveTimer,
     }
@@ -311,6 +394,7 @@ local function addMomentum(amount, kind)
         momentumStacks = 0
         momentumKind = kind
     end
+    equippedMomentumKind = kind
     momentumStacks = math.min(cap, momentumStacks + amount)
     momentumTimer = MOMENTUM_TIMER
 end
@@ -318,6 +402,47 @@ end
 local function setMomentum(value)
     momentumStacks = math.max(0, math.min(value, getMomentumCap(momentumKind)))
     momentumTimer = momentumStacks > 0 and MOMENTUM_TIMER or 0
+end
+
+--- Classifies the readied weapon into the Momentum profile that can currently
+--- use it. C-chain perks admit all other weapon records, while unarmed and
+--- non-weapon equipment cannot carry Long Blade Momentum.
+local function getEquippedMomentumKind(weapon, cRank)
+    if isLongBladeWeapon(weapon) then
+        return "longblade"
+    end
+    if weapon and types.Weapon.objectIsInstance(weapon) and cRank > 0 then
+        return "other"
+    end
+    return nil
+end
+
+--- Reconciles Momentum as soon as equipment or the C-chain rank changes.
+--- Switching between the Long Blade and transferred-form profiles follows the
+--- same reset rule already used when a hit changes `momentumKind`; changing to
+--- another weapon within the same profile preserves the current stacks.
+local function syncMomentumKindWithEquipment(force)
+    local weapon = types.Actor.getEquipment(self, types.Actor.EQUIPMENT_SLOT.CarriedRight)
+    local cRank = getCRank()
+    if not force and weapon == observedMomentumWeapon and cRank == observedCRank then
+        return false
+    end
+    observedMomentumWeapon = weapon
+    observedCRank = cRank
+
+    local nextKind = getEquippedMomentumKind(weapon, cRank)
+    equippedMomentumKind = nextKind
+    if nextKind == nil then
+        setMomentum(0)
+    elseif nextKind ~= momentumKind then
+        momentumKind = nextKind
+        setMomentum(0)
+    else
+        -- A respec can lower the current profile's cap without changing its
+        -- name, so clamp existing stacks against the newly reported rank.
+        setMomentum(momentumStacks)
+    end
+    return true
 end
 
 hasPoise = function()
@@ -582,16 +707,36 @@ end
 --  SHARED HIT HANDLER
 -- ============================================================
 
-local function handleOutgoingPlayerHit(attack)
+local function handleOutgoingPlayerHit(attack, source)
+    if alreadyHandledOutgoingHit(attack) then
+        return
+    end
     local kind = isAllowedMomentumWeapon(attack)
     lastHitDebug = describeAttackForDebug(attack, kind)
+    lastHitDebug.source = source or "direct"
     local criticalLanded = applyMomentumDamageBonus(attack, kind)
-    if kind and attack.successful == true and (isChargedAttack(attack) or criticalLanded) then
+    local blockReason = momentumBlockReason(attack, kind, criticalLanded)
+    lastHitDebug.blockReason = blockReason
+    if not blockReason then
         addMomentum(1, kind)
         lastHitDebug.stacksAfter = momentumStacks
         maybeStartOverdrive()
         updatePoiseBonus()
         LongBladeHud.forceUpdate(getHudState())
+        Log(3, nil, function()
+            return "Long Blade Momentum gained via " .. tostring(lastHitDebug.source)
+                .. ": stacks=" .. tostring(momentumStacks)
+                .. " kind=" .. tostring(kind)
+        end)
+    else
+        Log(3, nil, function()
+            return "Long Blade Momentum blocked via " .. tostring(lastHitDebug.source)
+                .. ": " .. tostring(blockReason)
+                .. " success=" .. tostring(attack.successful)
+                .. " strength=" .. tostring(attack.strength)
+                .. " ratio=" .. tostring(getChargeRatio(attack))
+                .. " kind=" .. tostring(kind)
+        end)
     end
 end
 
@@ -599,7 +744,7 @@ interfaces.ErnPerkFramework.registerOnHitHandler({
     id = ns .. "_longblade_on_hit",
     handler = function(attack)
         if isPlayerAttack(attack) then
-            handleOutgoingPlayerHit(attack)
+            handleOutgoingPlayerHit(attack, "direct")
             return
         end
 
@@ -626,11 +771,8 @@ interfaces.ErnPerkFramework.registerOnHitHandler({
     end,
 })
 
-local function onForwardedPlayerHit(data)
-    if type(data) ~= "table" then
-        return
-    end
-    handleOutgoingPlayerHit(data)
+local function onPlayerHitActor(attack)
+    handleOutgoingPlayerHit(attack or {}, "target-bridge")
 end
 
 -- ============================================================
@@ -638,6 +780,7 @@ end
 -- ============================================================
 
 local function onUpdate(dt)
+    syncMomentumKindWithEquipment(false)
     if momentumStacks > 0 then
         momentumTimer = momentumTimer - dt
         if momentumTimer <= 0 then
@@ -674,7 +817,14 @@ local function onLoad(data)
     lastHitTime = data and data.lastHitTime or -9999
     overdriveTimer = data and data.overdriveTimer or 0
     riposteCooldown = data and data.riposteCooldown or 0
+    syncMomentumKindWithEquipment(true)
     LongBladeHud.forceUpdate(getHudState())
+end
+
+--- Prints Long Blade debug command output to the visible in-game console.
+--- @param message any Text or value to display.
+local function consolePrint(message)
+    ui.printToConsole(tostring(message), ui.CONSOLE_COLOR.Default)
 end
 
 local function onConsoleCommand(mode, command)
@@ -683,7 +833,7 @@ local function onConsoleCommand(mode, command)
         return
     end
 
-    print("Long Blade Momentum: stacks=" .. tostring(momentumStacks)
+    consolePrint("Long Blade Momentum: stacks=" .. tostring(momentumStacks)
         .. " cap=" .. tostring(getMomentumCap(momentumKind))
         .. " kind=" .. tostring(momentumKind)
         .. " timer=" .. tostring(momentumTimer)
@@ -691,11 +841,12 @@ local function onConsoleCommand(mode, command)
         .. " C=" .. tostring(getCRank()))
 
     if not lastHitDebug then
-        print("Long Blade last hit: none seen by handler.")
+        consolePrint("Long Blade last hit: none seen by handler.")
         return
     end
 
-    print("Long Blade last hit:"
+    consolePrint("Long Blade last hit:"
+        .. " source=" .. tostring(lastHitDebug.source)
         .. " player=" .. tostring(lastHitDebug.attackerIsPlayer)
         .. " success=" .. tostring(lastHitDebug.successful)
         .. " sourceType=" .. tostring(lastHitDebug.sourceType)
@@ -713,6 +864,7 @@ local function onConsoleCommand(mode, command)
         .. " critChance=" .. tostring(lastHitDebug.criticalChance)
         .. " critLanded=" .. tostring(lastHitDebug.criticalLanded)
         .. " extraDamage=" .. tostring(lastHitDebug.extraDamage)
+        .. " block=" .. tostring(lastHitDebug.blockReason)
         .. " target=" .. tostring(lastHitDebug.targetId))
 end
 
@@ -847,7 +999,7 @@ return {
         willAttemptRiposte = willAttemptRiposte,
     },
     eventHandlers = {
-        SPerks_PlayerHitActor = onForwardedPlayerHit,
+        SPerks_PlayerHitActor = onPlayerHitActor,
     },
     engineHandlers = {
         onConsoleCommand = onConsoleCommand,

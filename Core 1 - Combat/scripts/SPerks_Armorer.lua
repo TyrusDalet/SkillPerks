@@ -28,8 +28,10 @@ local ns         = require("scripts.SkillPerks.namespace")
 local interfaces = require("openmw.interfaces")
 local types      = require("openmw.types")
 local self       = require("openmw.self")
+local core       = require("openmw.core")
+local async      = require("openmw.async")
+local ui         = require("openmw.ui")
 
-local StatTracker = require("scripts.SkillPerks.shared.stat_tracker")
 local ChainRequirements = require("scripts.SkillPerks.shared.chain_requirements")
 
 -- Reads the framework's cached player perk set for quick rank checks.
@@ -57,6 +59,7 @@ local ids = {
 -- ============================================================
 
 local REPAIRABLE_TYPES = { types.Weapon, types.Armor, types.Repair, types.Lockpick, types.Probe }
+local OVERREPAIR_TYPES = { types.Weapon, types.Armor }
 
 -- True for anything with condition that Armorer perks are allowed to preserve.
 local function isRepairable(item)
@@ -68,10 +71,66 @@ local function isRepairable(item)
     return false
 end
 
+-- Over-repair should only raise combat gear above its normal ceiling.
+-- Tools still need A-chain durability tracking, but should never be
+-- temporarily damaged just because the repair menu opened.
+local function canOverRepair(item)
+    for _, t in ipairs(OVERREPAIR_TYPES) do
+        if t.objectIsInstance(item) then
+            return true
+        end
+    end
+    return false
+end
+
 -- Returns the condition ceiling for repairable objects with different record fields.
 local function getMaxCondition(item)
     local record = item.type.record(item)
     return record.health or record.maxCondition
+end
+
+-- Item condition writes are global/self scoped. Player scripts can read
+-- carried item condition, but must ask Core 0's global script to change it.
+local function modifyItemCondition(item, amount, maxCondition, minCondition)
+    core.sendGlobalEvent("SPerks_ModifyItemCondition", {
+        item = item,
+        amount = amount,
+        maxCondition = maxCondition,
+        minCondition = minCondition,
+    })
+end
+
+local function setItemCondition(item, value, maxCondition, minCondition)
+    core.sendGlobalEvent("SPerks_ModifyItemCondition", {
+        item = item,
+        value = value,
+        maxCondition = maxCondition,
+        minCondition = minCondition,
+    })
+end
+
+local function removeItem(item)
+    core.sendGlobalEvent("SPerks_RemoveItem", {
+        item = item,
+        count = 1,
+    })
+end
+
+-- Inventory Extender can keep repair-window row data cached after a global
+-- condition write. Refreshing shortly after the write makes A3/A4 tool saves
+-- visible before the player leaves the repair menu.
+local function refreshInventoryExtenderSoon()
+    local inventoryExtender = interfaces.InventoryExtender
+    if not inventoryExtender or not inventoryExtender.update then
+        return
+    end
+
+    async:newUnsavableSimulationTimer(0.03, function()
+        pcall(inventoryExtender.update)
+    end)
+    async:newUnsavableSimulationTimer(0.12, function()
+        pcall(inventoryExtender.update)
+    end)
 end
 
 -- Pauses condition polling while over-repair is deliberately shifting values.
@@ -89,31 +148,45 @@ local function getARank()
     else return 0 end
 end
 
-local aFallbackTracker = StatTracker.newStatModTracker(self)
+local ARMORER_TOOLKIT = {
+    [1] = { recordId = "SPerks Repair Tongs", name = "Repair Tongs" },
+    [2] = { recordId = "SPerks Journeyman Repair Hammer", name = "Journeyman Repair Hammer" },
+    [3] = { recordId = "SPerks Master Repair Hammer", name = "Master Repair Hammer" },
+    [4] = { recordId = "Sperks SMaster Repair Hammer", name = "Secret Master's Repair Hammer" },
+}
 
--- A1 uses a persistent skill bonus because repair-roll timing is not hookable.
-local function updateA1Fallback()
-    aFallbackTracker.apply("skills", "armorer", getARank() > 0 and 5 or 0)
+local ARMORER_TOOLKIT_RECORDS = {}
+for _, tool in pairs(ARMORER_TOOLKIT) do
+    ARMORER_TOOLKIT_RECORDS[tool.recordId:lower()] = true
 end
-
--- Removes the A1 effective Armorer skill bonus.
-local function clearA1Fallback()
-    aFallbackTracker.apply("skills", "armorer", 0)
-end
-
--- Live/polled perks do their work from UI or update handlers, not on add/remove.
-local function noPersistentEffect() end
 
 local A2_FLAT_RESTORE = 5
 local ARMORER_POLL_INTERVAL = 0.2
 local ARMORER_REPAIR_MODE = "Repair"
+local MASTER_TINKERER_MIN_QUALITY = 0.5
+local MASTER_TINKERER_MAX_QUALITY = 2.0
+local MASTER_TINKERER_MIN_CHANCE = 0.10
+local MASTER_TINKERER_MAX_CHANCE = 0.75
+local TOOL_SAFETY_CONDITION = 2
 
 local armorerPollTimer = 0
+local toolkitPollTimer = 0
 local lastToolId = nil
 local lastToolCondition = nil
 local aConditionSnapshot = {}
 local pendingRepairTargetId = nil
+local pendingRepairAttempts = {}
+local maintainedToolkitItemId = nil
+local maintainedToolkitRecordId = nil
+local toolkitCreatePending = false
+local repairToolSafetyReserves = {}
 local inventoryExtenderHandlersRegistered = false
+local onRepairUIOpened
+local refreshAConditionSnapshot
+local queueRepairAttempt
+
+-- Live/polled perks do their work from UI or update handlers, not on add/remove.
+local function noPersistentEffect() end
 
 -- Finds a carried item by OpenMW's unique object id.
 local function findCarriedItemById(itemId)
@@ -128,12 +201,247 @@ local function findCarriedItemById(itemId)
     return nil
 end
 
+local function removePendingRepairAttempt(attempt)
+    for i = #pendingRepairAttempts, 1, -1 do
+        if pendingRepairAttempts[i] == attempt then
+            table.remove(pendingRepairAttempts, i)
+            return
+        end
+    end
+end
+
+-- Scales Master Tinkerer from ordinary tools to high-quality tools without
+-- making exceptional 5.0+ tools the basis of the whole curve.
+local function getMasterTinkererSaveChance(tool)
+    local quality = types.Repair.record(tool).quality or MASTER_TINKERER_MIN_QUALITY
+    if quality >= MASTER_TINKERER_MAX_QUALITY then
+        return MASTER_TINKERER_MAX_CHANCE
+    end
+    if quality <= MASTER_TINKERER_MIN_QUALITY then
+        return MASTER_TINKERER_MIN_CHANCE
+    end
+
+    local t = (quality - MASTER_TINKERER_MIN_QUALITY)
+        / (MASTER_TINKERER_MAX_QUALITY - MASTER_TINKERER_MIN_QUALITY)
+    local smooth = t * t * (3 - (2 * t))
+    return MASTER_TINKERER_MIN_CHANCE
+        + ((MASTER_TINKERER_MAX_CHANCE - MASTER_TINKERER_MIN_CHANCE) * smooth)
+end
+
+-- Keeps one-use repair tools alive until A3/A4 can decide whether the use
+-- should be saved. Without this reserve, vanilla destroys the tool at zero
+-- condition before the delayed repair-result resolver can restore it.
+local function ensureRepairToolSafetyReserve(tool)
+    if getARank() < 3 or not tool or not types.Repair.objectIsInstance(tool) then
+        return
+    end
+    if repairToolSafetyReserves[tool.id] then
+        return
+    end
+
+    local toolData = types.Item.itemData(tool)
+    local condition = toolData and toolData.condition
+    if not condition or condition <= 0 or condition >= TOOL_SAFETY_CONDITION then
+        return
+    end
+
+    local reserve = TOOL_SAFETY_CONDITION - condition
+    repairToolSafetyReserves[tool.id] = reserve
+    setItemCondition(tool, TOOL_SAFETY_CONDITION, nil, false)
+    refreshInventoryExtenderSoon()
+end
+
+local function getRepairToolSafetyReserve(tool)
+    if not tool then
+        return 0
+    end
+    return repairToolSafetyReserves[tool.id] or 0
+end
+
+local function getLogicalToolCondition(tool, actualCondition)
+    if actualCondition == nil then
+        return nil
+    end
+    local reserve = getRepairToolSafetyReserve(tool)
+    if reserve <= 0 then
+        return actualCondition
+    end
+    if actualCondition <= reserve then
+        return actualCondition
+    end
+    return actualCondition - reserve
+end
+
+local function clearRepairToolSafetyReserves()
+    for itemId, reserve in pairs(repairToolSafetyReserves) do
+        local tool = findCarriedItemById(itemId)
+        if tool and types.Repair.objectIsInstance(tool) then
+            local toolData = types.Item.itemData(tool)
+            local condition = toolData and toolData.condition
+            if condition then
+                local logicalCondition = condition - reserve
+                if logicalCondition <= 0 then
+                    removeItem(tool)
+                else
+                    setItemCondition(tool, logicalCondition, nil, false)
+                end
+            end
+        end
+    end
+    repairToolSafetyReserves = {}
+    refreshInventoryExtenderSoon()
+end
+
+local function isArmorerToolkitRecord(recordId)
+    return recordId and ARMORER_TOOLKIT_RECORDS[recordId:lower()] == true
+end
+
+local function isProtectedToolkitItem(item)
+    return item and isArmorerToolkitRecord(item.recordId)
+end
+
+local function blockProtectedToolkitAction()
+    ui.showMessage("This tool is part of your Armorer kit.")
+    return false
+end
+
+local function forgetMaintainedToolkitItem()
+    maintainedToolkitItemId = nil
+    maintainedToolkitRecordId = nil
+end
+
+local function removeMaintainedToolkitItem()
+    local item = findCarriedItemById(maintainedToolkitItemId)
+    if item and isArmorerToolkitRecord(item.recordId) then
+        removeItem(item)
+    end
+    forgetMaintainedToolkitItem()
+end
+
+local function findExistingToolkitItem(recordId)
+    for _, item in ipairs(types.Actor.inventory(self):getAll()) do
+        if item.recordId == recordId then
+            return item
+        end
+    end
+    return nil
+end
+
+local function rememberToolkitItem(item)
+    if not item then
+        return
+    end
+    maintainedToolkitItemId = item.id
+    maintainedToolkitRecordId = item.recordId
+end
+
+-- Maintains exactly one free repair tool granted by the Armorer A-chain.
+-- If the player removes the maintained instance from their inventory, it is
+-- forgotten and replaced. If their rank improves, the old tool is removed and
+-- the stronger record is granted instead.
+local function maintainArmorerToolkit()
+    local rank = getARank()
+    if rank == 0 then
+        removeMaintainedToolkitItem()
+        toolkitCreatePending = false
+        return
+    end
+
+    local desired = ARMORER_TOOLKIT[rank]
+    if not desired then
+        return
+    end
+
+    local maintained = findCarriedItemById(maintainedToolkitItemId)
+    if maintained then
+        if maintained.recordId == desired.recordId then
+            toolkitCreatePending = false
+            return
+        end
+        removeMaintainedToolkitItem()
+    else
+        forgetMaintainedToolkitItem()
+    end
+
+    local existing = findExistingToolkitItem(desired.recordId)
+    if existing then
+        rememberToolkitItem(existing)
+        toolkitCreatePending = false
+        return
+    end
+
+    if toolkitCreatePending then
+        existing = findExistingToolkitItem(desired.recordId)
+        if existing then
+            rememberToolkitItem(existing)
+            toolkitCreatePending = false
+        end
+        return
+    end
+
+    toolkitCreatePending = true
+    core.sendGlobalEvent("SPerks_DuplicateItem", {
+        target = self,
+        recordId = desired.recordId,
+        count = 1,
+    })
+    ui.showMessage("You prepare a " .. desired.name .. ".")
+end
+
+-- Remembers the repair tool selected in Inventory Extender for A-chain polling.
+local function rememberRepairTool(tool, keepSnapshot)
+    if not tool or not types.Repair.objectIsInstance(tool) then
+        return
+    end
+
+    local toolData = types.Item.itemData(tool)
+    lastToolId = tool.id
+    lastToolCondition = toolData and getLogicalToolCondition(tool, toolData.condition) or nil
+    if not keepSnapshot and refreshAConditionSnapshot then
+        aConditionSnapshot = refreshAConditionSnapshot()
+    end
+end
+
 -- Inventory Extender exposes the clicked repair target, which vanilla UI hooks do not.
-local function captureRepairTarget(row)
-    if interfaces.UI.getMode() == ARMORER_REPAIR_MODE and row and row.item and isRepairable(row.item) then
+local function captureRepairTarget(row, ctx, windowType)
+    if not row or not row.item then
+        return true
+    end
+
+    if isProtectedToolkitItem(row.item) then
+        return blockProtectedToolkitAction()
+    end
+
+    -- Repair-tool use opens the vanilla repair UI after row handlers return.
+    -- Prepare over-repair here so the item list is built from the lowered
+    -- condition values instead of waiting for UiModeChanged, which is too late.
+    if interfaces.UI.getMode() ~= ARMORER_REPAIR_MODE and types.Repair.objectIsInstance(row.item) then
+        rememberRepairTool(row.item)
+        onRepairUIOpened(row.item)
+        return true
+    end
+
+    if interfaces.UI.getMode() == ARMORER_REPAIR_MODE and isRepairable(row.item) then
         pendingRepairTargetId = row.item.id
+        if queueRepairAttempt then
+            queueRepairAttempt(row.item)
+        end
     end
     return true
+end
+
+local function protectToolkitPickup(row, ctx, windowType)
+    if row and isProtectedToolkitItem(row.item) then
+        if interfaces.UI.getMode() == "Interface" and windowType == "Inventory" then
+            return true
+        end
+        if windowType ~= "Inventory" then
+            removeItem(row.item)
+            refreshInventoryExtenderSoon()
+        end
+        return blockProtectedToolkitAction()
+    end
+    return captureRepairTarget(row, ctx, windowType)
 end
 
 -- Registers once with Inventory Extender so A2 can restore the actual failed item.
@@ -148,12 +456,12 @@ local function ensureInventoryExtenderHandlers()
     end
 
     inventoryExtender.registerRowUseHandler("SkillPerks_ArmorerRepairTarget", captureRepairTarget)
-    inventoryExtender.registerRowPickupHandler("SkillPerks_ArmorerRepairTarget", captureRepairTarget)
+    inventoryExtender.registerRowPickupHandler("SkillPerks_ArmorerRepairTarget", protectToolkitPickup)
     inventoryExtenderHandlersRegistered = true
 end
 
 -- Captures current carried item condition so repair attempts can be detected.
-local function refreshAConditionSnapshot()
+refreshAConditionSnapshot = function()
     local snapshot = {}
     for _, item in ipairs(types.Actor.inventory(self):getAll()) do
         if isRepairable(item) then
@@ -166,9 +474,124 @@ local function refreshAConditionSnapshot()
     return snapshot
 end
 
+-- Returns the remembered repair tool, falling back to the carried-right slot.
+local function getActiveRepairTool()
+    local tool = findCarriedItemById(lastToolId)
+    if tool and types.Repair.objectIsInstance(tool) then
+        return tool
+    end
+
+    tool = types.Actor.getEquipment(self, types.Actor.EQUIPMENT_SLOT.CarriedRight)
+    if tool and types.Repair.objectIsInstance(tool) then
+        return tool
+    end
+
+    return nil
+end
+
+local function resolveRepairAttempt(attempt)
+    removePendingRepairAttempt(attempt)
+
+    local tool = findCarriedItemById(attempt.toolId)
+    local toolExists = tool and types.Repair.objectIsInstance(tool)
+    local rank = getARank()
+
+    local toolData = toolExists and types.Item.itemData(tool) or nil
+    local toolAfter = toolData and toolData.condition
+    local toolWasUsed = (not toolExists and attempt.toolActualBefore ~= nil)
+        or (toolAfter and attempt.toolActualBefore and toolAfter < attempt.toolActualBefore)
+
+    local target = findCarriedItemById(attempt.targetId)
+    local targetData = target and types.Item.itemData(target)
+    local targetAfter = targetData and targetData.condition
+    local succeeded = targetAfter and attempt.targetBefore and targetAfter > attempt.targetBefore
+    local expectedToolCondition = nil
+
+    if not toolWasUsed then
+        if toolExists then
+            lastToolId = tool.id
+            lastToolCondition = getLogicalToolCondition(tool, toolAfter)
+        end
+        aConditionSnapshot = refreshAConditionSnapshot()
+        return
+    end
+
+    if succeeded then
+        if toolExists and rank >= 4 and math.random() < getMasterTinkererSaveChance(tool) then
+            setItemCondition(tool, attempt.toolActualBefore, nil, false)
+            refreshInventoryExtenderSoon()
+            expectedToolCondition = attempt.toolBefore
+        end
+    else
+        if toolExists and rank >= 3 then
+            setItemCondition(tool, attempt.toolActualBefore, nil, false)
+            refreshInventoryExtenderSoon()
+            expectedToolCondition = attempt.toolBefore
+        end
+        if rank >= 2 and target then
+            local maxCond = getMaxCondition(target)
+            if maxCond then
+                modifyItemCondition(target, A2_FLAT_RESTORE, maxCond)
+            end
+        end
+    end
+
+    if toolExists then
+        local reserve = getRepairToolSafetyReserve(tool)
+        if expectedToolCondition == nil and reserve > 0 and toolAfter <= reserve then
+            removeItem(tool)
+            repairToolSafetyReserves[tool.id] = nil
+            refreshInventoryExtenderSoon()
+            lastToolId = nil
+            lastToolCondition = nil
+        else
+            lastToolId = tool.id
+            lastToolCondition = expectedToolCondition or getLogicalToolCondition(tool, toolAfter)
+        end
+    end
+    aConditionSnapshot = refreshAConditionSnapshot()
+    pendingRepairTargetId = nil
+end
+
+-- Inventory Extender tells us exactly which item the player clicked in the
+-- repair UI. Resolve A2-A4 from that click instead of relying only on a
+-- later poll of whichever repair tool OpenMW still exposes.
+queueRepairAttempt = function(target)
+    if getARank() < 1 then
+        return
+    end
+
+    local tool = getActiveRepairTool()
+    if not tool or not target then
+        return
+    end
+
+    local toolData = types.Item.itemData(tool)
+    local targetData = types.Item.itemData(target)
+    if not toolData or toolData.condition == nil or not targetData or targetData.condition == nil then
+        return
+    end
+
+    local attempt = {
+        toolId = tool.id,
+        targetId = target.id,
+        toolActualBefore = toolData.condition,
+        toolBefore = getLogicalToolCondition(tool, toolData.condition),
+        targetBefore = targetData.condition,
+    }
+    table.insert(pendingRepairAttempts, attempt)
+
+    async:newUnsavableSimulationTimer(0.12, function()
+        resolveRepairAttempt(attempt)
+    end)
+end
+
 -- Watches repair-tool wear to detect attempts, then applies A2-A4 benefits.
 local function tickArmorerDetection(dt)
     if getARank() < 2 then
+        return
+    end
+    if #pendingRepairAttempts > 0 then
         return
     end
     armorerPollTimer = armorerPollTimer - dt
@@ -177,8 +600,8 @@ local function tickArmorerDetection(dt)
     end
     armorerPollTimer = ARMORER_POLL_INTERVAL
 
-    local tool = types.Actor.getEquipment(self, types.Actor.EQUIPMENT_SLOT.CarriedRight)
-    if not tool or not types.Repair.objectIsInstance(tool) then
+    local tool = getActiveRepairTool()
+    if not tool then
         lastToolId = nil
         lastToolCondition = nil
         aConditionSnapshot = refreshAConditionSnapshot()
@@ -187,15 +610,16 @@ local function tickArmorerDetection(dt)
 
     local toolData = types.Item.itemData(tool)
     local toolCondition = toolData and toolData.condition
+    local logicalToolCondition = getLogicalToolCondition(tool, toolCondition)
 
     if tool.id ~= lastToolId then
         lastToolId = tool.id
-        lastToolCondition = toolCondition
+        lastToolCondition = logicalToolCondition
         aConditionSnapshot = refreshAConditionSnapshot()
         return
     end
 
-    if toolCondition == nil or lastToolCondition == nil or toolCondition >= lastToolCondition then
+    if logicalToolCondition == nil or lastToolCondition == nil or logicalToolCondition >= lastToolCondition then
         return
     end
 
@@ -212,30 +636,38 @@ local function tickArmorerDetection(dt)
         end
     end
 
+    local expectedToolCondition = nil
     if succeeded then
         if getARank() >= 4 then
-            local quality = types.Repair.record(tool).quality or 1
-            local saveChance = math.min(0.75, quality * 0.15)
+            local saveChance = getMasterTinkererSaveChance(tool)
             if math.random() < saveChance then
-                toolData.condition = lastToolCondition
+                setItemCondition(tool, lastToolCondition + getRepairToolSafetyReserve(tool), nil, false)
+                refreshInventoryExtenderSoon()
+                expectedToolCondition = lastToolCondition
             end
         end
     else
         if getARank() >= 3 then
-            toolData.condition = lastToolCondition
+            setItemCondition(tool, lastToolCondition + getRepairToolSafetyReserve(tool), nil, false)
+            refreshInventoryExtenderSoon()
+            expectedToolCondition = lastToolCondition
         end
         local target = findCarriedItemById(pendingRepairTargetId)
         if getARank() >= 2 and target then
             local itemData = types.Item.itemData(target)
             local maxCond = getMaxCondition(target)
             if itemData and maxCond then
-                itemData.condition = math.min(maxCond, itemData.condition + A2_FLAT_RESTORE)
+                modifyItemCondition(target, A2_FLAT_RESTORE, maxCond)
             end
         end
     end
 
-    local refreshedToolData = types.Item.itemData(tool)
-    lastToolCondition = refreshedToolData and refreshedToolData.condition
+    if expectedToolCondition ~= nil then
+        lastToolCondition = expectedToolCondition
+    else
+        local refreshedToolData = types.Item.itemData(tool)
+        lastToolCondition = refreshedToolData and getLogicalToolCondition(tool, refreshedToolData.condition)
+    end
     aConditionSnapshot = refreshAConditionSnapshot()
     pendingRepairTargetId = nil
 end
@@ -246,6 +678,7 @@ end
 
 local B_REDUCTION = { [1] = 0.25, [2] = 0.50 }
 local B_POLL_INTERVAL = 0.5
+local OVERREPAIR_CLAMP_MIN_LOSS = 1
 
 local bPollTimer = 0
 local bConditionSnapshot = {}
@@ -255,6 +688,23 @@ local function getBRank()
     if hasPerk(ids.B2) then return 2
     elseif hasPerk(ids.B1) then return 1
     else return 0 end
+end
+
+-- OpenMW can snap over-repaired items back to base max on the first
+-- condition hit. Treat that as a tiny real loss, not a 25/50-point crash.
+local function restoreDurabilityLoss(item, oldCond, newCond, reduction)
+    local maxCond = getMaxCondition(item)
+    if maxCond and oldCond > maxCond and newCond <= maxCond then
+        local visibleLoss = math.max(0, maxCond - newCond)
+        local estimatedLoss = math.max(OVERREPAIR_CLAMP_MIN_LOSS, visibleLoss)
+        local targetCondition = oldCond - (estimatedLoss * (1 - reduction))
+        setItemCondition(item, targetCondition, oldCond)
+        return
+    end
+
+    local lost = oldCond - newCond
+    local refund = lost * reduction
+    modifyItemCondition(item, refund, oldCond)
 end
 
 -- Captures current carried item condition for later loss comparison.
@@ -294,14 +744,7 @@ local function tickDurableCraft(dt)
             local newCond = itemData and itemData.condition
             local oldCond = bConditionSnapshot[item.id]
             if newCond and oldCond and newCond < oldCond then
-                local lost = oldCond - newCond
-                local maxCond = getMaxCondition(item)
-                local refund = lost * reduction
-                if maxCond then
-                    itemData.condition = math.min(maxCond, newCond + refund)
-                else
-                    itemData.condition = newCond + refund
-                end
+                restoreDurabilityLoss(item, oldCond, newCond, reduction)
             end
         end
     end
@@ -363,18 +806,18 @@ local function onRestComplete()
         for _, entry in ipairs(equipped) do
             local needed = entry.maxCond - entry.itemData.condition
             local applied = math.min(needed, perItemRestore)
-            entry.itemData.condition = entry.itemData.condition + applied
+            modifyItemCondition(entry.item, applied, entry.maxCond)
             leftoverPool = leftoverPool + (perItemRestore - applied)
         end
         if #unequipped > 0 then
             local perUnequipped = perItemRestore + (leftoverPool / #unequipped)
             for _, entry in ipairs(unequipped) do
-                entry.itemData.condition = math.min(entry.maxCond, entry.itemData.condition + perUnequipped)
+                modifyItemCondition(entry.item, perUnequipped, entry.maxCond)
             end
         end
     else
         for _, entry in ipairs(damagedItems) do
-            entry.itemData.condition = math.min(entry.maxCond, entry.itemData.condition + perItemRestore)
+            modifyItemCondition(entry.item, perItemRestore, entry.maxCond)
         end
     end
 end
@@ -404,8 +847,13 @@ local function copyNumberMap(map)
 end
 
 -- Temporarily lowers item condition so vanilla repair can push it past base max.
-local function onRepairUIOpened()
+onRepairUIOpened = function(tool)
     pendingRepairTargetId = nil
+
+    if tool then
+        ensureRepairToolSafetyReserve(tool)
+        rememberRepairTool(tool)
+    end
 
     local rank = getDRank()
     if rank == 0 or dSessionActive then
@@ -415,43 +863,47 @@ local function onRepairUIOpened()
     dSubtractedAmounts = {}
 
     local ratio = D_RATIO[rank]
+    aConditionSnapshot = {}
     for _, item in ipairs(types.Actor.inventory(self):getAll()) do
-        if isRepairable(item) then
+        if canOverRepair(item) then
             local itemData = types.Item.itemData(item)
             local maxCond = getMaxCondition(item)
             if itemData and itemData.condition and maxCond then
                 local subtract = maxCond * ratio
-                itemData.condition = itemData.condition - subtract
+                modifyItemCondition(item, -subtract, nil, false)
                 dSubtractedAmounts[item.id] = (dSubtractedAmounts[item.id] or 0) + subtract
+                aConditionSnapshot[item.id] = itemData.condition - subtract
             end
         end
     end
-    aConditionSnapshot = refreshAConditionSnapshot()
 
-    local tool = types.Actor.getEquipment(self, types.Actor.EQUIPMENT_SLOT.CarriedRight)
-    local toolData = tool and types.Item.itemData(tool)
-    lastToolId = tool and tool.id or nil
-    lastToolCondition = toolData and toolData.condition or nil
+    tool = tool or getActiveRepairTool()
+    if tool then
+        ensureRepairToolSafetyReserve(tool)
+        rememberRepairTool(tool, true)
+    end
 end
 
 -- Restores the temporary subtraction after the player leaves self-repair.
 local function onRepairUIClosed()
     pendingRepairTargetId = nil
-    if not dSessionActive then
-        return
-    end
-    dSessionActive = false
+    clearRepairToolSafetyReserves()
 
-    for _, item in ipairs(types.Actor.inventory(self):getAll()) do
-        local subtracted = dSubtractedAmounts[item.id]
-        if subtracted and subtracted > 0 then
-            local itemData = types.Item.itemData(item)
-            if itemData and itemData.condition then
-                itemData.condition = itemData.condition + subtracted
+    if dSessionActive then
+        dSessionActive = false
+
+        for _, item in ipairs(types.Actor.inventory(self):getAll()) do
+            local subtracted = dSubtractedAmounts[item.id]
+            if subtracted and subtracted > 0 then
+                local itemData = types.Item.itemData(item)
+                if itemData and itemData.condition then
+                    modifyItemCondition(item, subtracted)
+                end
             end
         end
+        dSubtractedAmounts = {}
     end
-    dSubtractedAmounts = {}
+
 end
 
 -- Routes rest and self-repair UI transitions into Armorer perk handlers.
@@ -470,6 +922,11 @@ end
 -- Polls condition changes that OpenMW does not expose as direct events.
 local function onUpdate(dt)
     ensureInventoryExtenderHandlers()
+    toolkitPollTimer = toolkitPollTimer - dt
+    if toolkitPollTimer <= 0 then
+        toolkitPollTimer = 1.0
+        maintainArmorerToolkit()
+    end
     tickArmorerDetection(dt)
     tickDurableCraft(dt)
 end
@@ -477,22 +934,28 @@ end
 -- Persists the skill bonus and any temporary over-repair subtraction.
 local function onSave()
     return {
-        aFallbackSnapshot = aFallbackTracker.snapshot(),
         dSessionActive = dSessionActive,
         dSubtractedAmounts = copyNumberMap(dSubtractedAmounts),
+        repairToolSafetyReserves = copyNumberMap(repairToolSafetyReserves),
+        maintainedToolkitItemId = maintainedToolkitItemId,
+        maintainedToolkitRecordId = maintainedToolkitRecordId,
     }
 end
 
 -- Reverses saved deltas and clears in-progress condition tracking.
 local function onLoad(data)
     data = data or {}
-    aFallbackTracker.restoreAndReverse(data.aFallbackSnapshot)
+    maintainedToolkitItemId = data.maintainedToolkitItemId
+    maintainedToolkitRecordId = data.maintainedToolkitRecordId
+    toolkitCreatePending = false
 
     if data.dSessionActive then
         dSessionActive = true
         dSubtractedAmounts = data.dSubtractedAmounts or {}
         onRepairUIClosed()
     end
+    repairToolSafetyReserves = data.repairToolSafetyReserves or {}
+    clearRepairToolSafetyReserves()
 
     lastToolId = nil
     lastToolCondition = nil
@@ -512,11 +975,11 @@ interfaces.ErnPerkFramework.registerPerk({
     category = ChainRequirements.category("Combat", "Armorer", 1),
     art = "textures\\levelup\\knight",
     localizedFlavour = "A hammer, a strap, a loose rivet: each has a voice, and your hands have learned to listen.",
-    localizedDescription = "Your repairs are more effective - a passive +5 to your effective "
-        .. "Armorer skill.",
+    localizedDescription = "You always keep a spare Repair Tongs ready. If the perk-granted "
+        .. "tool is removed from your inventory, another is prepared.",
     requirements = ChainRequirements.forSlot(SKILL_ID, ids, "A1"),
-    onAdd = updateA1Fallback,
-    onRemove = clearA1Fallback,
+    onAdd = noPersistentEffect,
+    onRemove = noPersistentEffect,
 })
 
 interfaces.ErnPerkFramework.registerPerk({
@@ -525,8 +988,8 @@ interfaces.ErnPerkFramework.registerPerk({
     category = ChainRequirements.category("Combat", "Armorer", 2),
     art = "textures\\levelup\\knight",
     localizedFlavour = "Even a failed repair leaves evidence behind. A bent plate, a stubborn seam, a lesson worth taking.",
-    localizedDescription = "Failed repairs still restore a small amount of condition to the "
-        .. "item you attempted to repair.",
+    localizedDescription = "Your prepared tool improves to a Journeyman Repair Hammer. "
+        .. "Failed repairs still restore a small amount of condition to the item you attempted to repair.",
     requirements = ChainRequirements.forSlot(SKILL_ID, ids, "A2"),
     onAdd = noPersistentEffect,
     onRemove = noPersistentEffect,
@@ -538,7 +1001,8 @@ interfaces.ErnPerkFramework.registerPerk({
     category = ChainRequirements.category("Combat", "Armorer", 3),
     art = "textures\\levelup\\knight",
     localizedFlavour = "You no longer strike blindly at the work. If the metal refuses, your tool comes away whole.",
-    localizedDescription = "Failed repairs no longer consume durability from your repair tool.",
+    localizedDescription = "Your prepared tool improves to a Master's Repair Hammer. "
+        .. "Failed repairs no longer consume durability from your repair tool.",
     requirements = ChainRequirements.forSlot(SKILL_ID, ids, "A3"),
     onAdd = noPersistentEffect,
     onRemove = noPersistentEffect,
@@ -550,8 +1014,9 @@ interfaces.ErnPerkFramework.registerPerk({
     category = ChainRequirements.category("Combat", "Armorer", 4),
     art = "textures\\levelup\\knight",
     localizedFlavour = "Fine tools deserve fine hands. Under your care, a good hammer lasts long past the work that should have spent it.",
-    localizedDescription = "Successful repairs have a chance not to degrade your repair tool, "
-        .. "scaling with the tool's own quality.",
+    localizedDescription = "Your prepared tool improves to the Secret Master's Repair Hammer. "
+        .. "Successful repairs have a chance to restore the durability spent by your repair tool once the repair is resolved. "
+        .. "This chance scales with the tool's own quality.",
     requirements = ChainRequirements.forSlot(SKILL_ID, ids, "A4"),
     onAdd = noPersistentEffect,
     onRemove = noPersistentEffect,

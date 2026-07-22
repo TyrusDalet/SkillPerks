@@ -31,7 +31,6 @@ local self       = require("openmw.self")
 local StatTracker       = require("scripts.SkillPerks.shared.stat_tracker")
 local ChainRequirements = require("scripts.SkillPerks.shared.chain_requirements")
 local ArmorPoints        = require("scripts.SkillPerks.shared.armor_points")
-local CombatMath         = require("scripts.SkillPerks.shared.combat_math")
 
 -- Reads the framework's cached player perk set for quick rank checks.
 local function hasPerk(id)
@@ -265,6 +264,17 @@ end
 local D1_RESIST_CAP = 30
 local D2_SHIELD_CAP = 45
 local AC_DIVISOR = 10
+local AR_LOCATIONS = {
+    { slot = types.Actor.EQUIPMENT_SLOT.Cuirass,       weight = 0.3  },
+    { slot = types.Actor.EQUIPMENT_SLOT.CarriedLeft,   weight = 0.1  },
+    { slot = types.Actor.EQUIPMENT_SLOT.Helmet,        weight = 0.1  },
+    { slot = types.Actor.EQUIPMENT_SLOT.Greaves,       weight = 0.1  },
+    { slot = types.Actor.EQUIPMENT_SLOT.Boots,         weight = 0.1  },
+    { slot = types.Actor.EQUIPMENT_SLOT.RightPauldron, weight = 0.1  },
+    { slot = types.Actor.EQUIPMENT_SLOT.LeftPauldron,  weight = 0.1  },
+    { slot = types.Actor.EQUIPMENT_SLOT.RightGauntlet, weight = 0.05 },
+    { slot = types.Actor.EQUIPMENT_SLOT.LeftGauntlet,  weight = 0.05 },
+}
 
 local D_ELEMENTS = { "fire", "frost", "shock" }
 local D1_RESIST_EFFECT = { fire = "resistfire",  frost = "resistfrost",  shock = "resistshock" }
@@ -277,9 +287,24 @@ local function getDRank()
     else return 0 end
 end
 
--- Uses the shared weighted armor-rating formula for D-chain scaling.
+-- Uses OpenMW's built-in per-piece effective AR, then applies vanilla slot
+-- weights so D-chain scaling tracks the player's actual total armor rating.
 local function getHeavyArmorRating()
-    return CombatMath.getArmorRating(self)
+    local total = 0
+    local unarmored = types.NPC.stats.skills.unarmored(self).modified
+
+    for _, location in ipairs(AR_LOCATIONS) do
+        local item = types.Actor.getEquipment(self, location.slot)
+        local pieceAR = 0
+        if item and types.Armor.objectIsInstance(item) then
+            pieceAR = interfaces.Combat.getEffectiveArmorRating(item, self) or 0
+        else
+            pieceAR = unarmored * unarmored * 0.0065
+        end
+        total = total + pieceAR * location.weight
+    end
+
+    return total
 end
 
 -- Applies Resist at D1 or Shield at D2 while the full-set gate is satisfied.
