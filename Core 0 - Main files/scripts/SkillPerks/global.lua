@@ -19,17 +19,15 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 --[[
     global.lua
 
-    Shared global-only operations, each reused by several different
-    perks across the Magic design doc (and potentially Combat/Stealth
-    later), rather than every perk defining its own bespoke global.lua
+    Shared global-only operations, reused by perks across Combat, Stealth,
+    and Magic rather than every perk defining its own bespoke global.lua
     handler for what is structurally the same operation. The design docs'
     own inline code examples (Alteration D's Kinetic Shell discharge,
     Illusion D's Total Devotion Command application, Alchemy C/D's potion/
     ingredient preservation, Enchant C's scroll duplication, Block B/C/D
     cross-actor writes) each sketch this ad hoc per-perk; consolidating
-    them here means later Core work
-    just sends one of these two events instead of re-deriving the
-    boilerplate every time.
+    them here means later Core work can send a focused event instead of
+    re-deriving global-context boilerplate every time.
 
     SPerks_CreateAndApplySpell
         world.createRecord is global-only, so any perk needing to apply a
@@ -71,11 +69,156 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
         Applies an already-existing spell id to a target actor. Unlike
         SPerks_CreateAndApplySpell, this does not create a dynamic spell
         record. Covers: Block C stored-spell firing and Block D reflection.
+
+    Security activation bridge
+        Records exact lock/trap targets for the player Security script and
+        synchronously intercepts Master Locksmith's empty-hand activation.
+        Successful rolls return here to weaken, unlock, and activate the
+        object in the context where those writes are legal.
+
+    Dialogue and merchant bridge
+        Relays Inventory Extender's actor-specific UI lifecycle to SkillPerks
+        player scripts, and owns NPC Mercantile, disposition, and barter-gold
+        writes used by the Mercantile and Speechcraft trees.
 ]]
 
 local core = require("openmw.core")
+local interfaces = require("openmw.interfaces")
 local world = require("openmw.world")
 local types = require("openmw.types")
+
+-- Security's player script owns perk state and the actual skill roll. This
+-- small registry lets the synchronous global activation handler know whether
+-- it should suppress vanilla's locked-door response and hand the activation
+-- to Master Locksmith instead.
+local securityMasteryRanks = {}
+
+local function playerKey(player)
+    return player and tostring(player.id) or nil
+end
+
+--- Records whether a player currently owns Master Locksmith.
+--- @param data table { player = GameObject, rank = number }
+local function setSecurityMasteryRank(data)
+    data = data or {}
+    local key = playerKey(data.player)
+    if not key then
+        return
+    end
+    local rank = math.max(0, math.floor(tonumber(data.rank) or 0))
+    securityMasteryRanks[key] = rank > 0 and rank or nil
+end
+
+-- Every lockable activation is reported to the player's Security script so
+-- tool wear can be matched to the exact lock or trap. An eligible empty-hand
+-- activation is consumed here because Activation handlers must decide
+-- synchronously whether vanilla activation should continue.
+local function onSecurityLockableActivated(target, actor)
+    if not actor or not types.Player.objectIsInstance(actor)
+            or not target or not types.Lockable.objectIsInstance(target) then
+        return true
+    end
+
+    actor:sendEvent("SPerks_SecurityLockTarget", {
+        target = target,
+        wasLocked = types.Lockable.isLocked(target),
+        hadTrap = types.Lockable.getTrapSpell(target) ~= nil,
+        lockLevel = types.Lockable.getLockLevel(target),
+    })
+
+    local rank = securityMasteryRanks[playerKey(actor)] or 0
+    if rank == 0 or not types.Lockable.isLocked(target) then
+        return true
+    end
+
+    local held = types.Actor.getEquipment(actor, types.Actor.EQUIPMENT_SLOT.CarriedRight)
+    if held ~= nil then
+        return true
+    end
+
+    actor:sendEvent("SPerks_SecurityBareHandAttempt", {
+        target = target,
+        lockLevel = types.Lockable.getLockLevel(target),
+        rank = rank,
+    })
+    return false
+end
+
+-- Completes a successful bare-hand attempt in global context. D2's lock
+-- damage is represented by lowering the retained lock level before unlocking;
+-- that matters if another script later relocks the same object.
+local function resolveSecurityBareHandAttempt(data)
+    data = data or {}
+    local target = data.target
+    local player = data.player
+    if not target or not target:isValid() or not player or not player:isValid()
+            or not types.Lockable.objectIsInstance(target) then
+        return
+    end
+
+    if data.success then
+        local currentLevel = types.Lockable.getLockLevel(target)
+        local weakenedLevel = math.max(1, currentLevel - math.max(0, data.weakenBy or 0))
+        if weakenedLevel < currentLevel then
+            types.Lockable.lock(target, weakenedLevel)
+        end
+        types.Lockable.unlock(target)
+        world._runStandardActivationAction(target, player)
+    end
+end
+
+-- Inventory Extender receives UI mode changes in its global bridge. Relaying
+-- them to the affected player gives SkillPerks player scripts a supported,
+-- actor-specific dialogue/barter/rest lifecycle event.
+local function relayUiModeChanged(data)
+    data = data or {}
+    if data.actor and data.actor:isValid() then
+        data.actor:sendEvent("SPerks_UiModeChanged", {
+            oldMode = data.oldMode,
+            newMode = data.newMode,
+            arg = data.arg,
+        })
+    end
+end
+
+--- Adds a temporary or persistent modifier to an NPC skill.
+--- @param data table { npc = GameObject, skill = string, amount = number }
+local function modifyNpcSkill(data)
+    data = data or {}
+    if not data.npc or not data.npc:isValid() or not types.NPC.objectIsInstance(data.npc)
+            or not data.skill then
+        return
+    end
+    local stat = types.NPC.stats.skills[data.skill](data.npc)
+    if stat then
+        stat.modifier = stat.modifier + (data.amount or 0)
+    end
+end
+
+--- Changes one NPC's base disposition toward a specific player.
+--- @param data table { npc = GameObject, player = GameObject, amount = number }
+local function modifyNpcDisposition(data)
+    data = data or {}
+    if not data.npc or not data.npc:isValid() or not data.player or not data.player:isValid()
+            or not types.NPC.objectIsInstance(data.npc) then
+        return
+    end
+    types.NPC.modifyBaseDisposition(data.npc, data.player, data.amount or 0)
+end
+
+--- Adds to an NPC's current barter gold, clamped at zero.
+--- @param data table { npc = GameObject, amount = number }
+local function modifyNpcBarterGold(data)
+    data = data or {}
+    if not data.npc or not data.npc:isValid() or not types.NPC.objectIsInstance(data.npc) then
+        return
+    end
+    local current = types.Actor.getBarterGold(data.npc)
+    types.Actor.setBarterGold(data.npc, math.max(0, current + (data.amount or 0)))
+end
+
+interfaces.Activation.addHandlerForType(types.Door, onSecurityLockableActivated)
+interfaces.Activation.addHandlerForType(types.Container, onSecurityLockableActivated)
 
 -- ============================================================
 --  DYNAMIC SPELL CREATION + APPLICATION
@@ -300,6 +443,12 @@ return {
         SPerks_RemoveItem = removeItem,
         SPerks_ModifyActorActiveEffect = modifyActorActiveEffect,
         SPerks_ApplyExistingSpell = applyExistingSpell,
+        SPerks_SetSecurityMasteryRank = setSecurityMasteryRank,
+        SPerks_ResolveSecurityBareHandAttempt = resolveSecurityBareHandAttempt,
+        SPerks_ModifyNpcSkill = modifyNpcSkill,
+        SPerks_ModifyNpcDisposition = modifyNpcDisposition,
+        SPerks_ModifyNpcBarterGold = modifyNpcBarterGold,
+        IE_UIModeChanged = relayUiModeChanged,
 
         -- Compatibility aliases for early Block drafts that shipped with a
         -- temporary per-skill global script.

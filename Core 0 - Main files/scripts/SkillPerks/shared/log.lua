@@ -26,14 +26,37 @@ local settings = require("scripts.SkillPerks.Settings.settings")
 
 local lastLoggedMessageCategory = nil
 
+--- Returns the active debug verbosity.
+--- `enableLogging` is kept as a legacy fallback for existing saves/configs.
+--- @return number verbosity 0 off, 1 important, 2 detailed, 3 trace.
+local function configuredVerbosity()
+    local verbosity = tonumber(settings.debugVerbosity) or 0
+    if verbosity <= 0 and settings.enableLogging then
+        verbosity = 1
+    end
+    return verbosity
+end
+
+--- Normalizes old and new logging signatures.
+--- Supported forms:
+---   log(category, message)           -> level 1
+---   log(level, category, message)    -> explicit level
+local function normalizeArgs(a, b, c)
+    if type(a) == "number" then
+        return a, b, c
+    end
+    return 1, a, b
+end
+
 --- @param category string|nil A dedupe key. Consecutive calls with the same
 ---   category are silently dropped so one noisy onUpdate loop doesn't spam
 ---   the console. Pass nil to always print regardless of the last category.
 --- @param message string|fun():string A literal string, or a function
 ---   returning one - use the function form for anything even slightly
 ---   expensive to build, since it's only evaluated when logging is on.
-local function Log(category, message)
-    if not settings.enableLogging then
+local function Log(a, b, c)
+    local level, category, message = normalizeArgs(a, b, c)
+    if configuredVerbosity() < level then
         return
     end
     if (category ~= nil) and (lastLoggedMessageCategory == category) then

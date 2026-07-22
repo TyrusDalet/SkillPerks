@@ -83,6 +83,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
         end
 ]]
 
+local interfaces = require("openmw.interfaces")
 local types = require("openmw.types")
 
 local StatTracker = {}
@@ -182,8 +183,9 @@ end
 --- Creates a tracker for stat.modifier writes on attributes, skills, and
 --- dynamic stats (health/magicka/fatigue).
 --- @param actor table The actor (usually `self`) whose stats will be modified.
+--- @param sourceName string|nil Optional external modifier report label for AAM/framework display.
 --- @return table tracker
-function StatTracker.newStatModTracker(actor)
+function StatTracker.newStatModTracker(actor, sourceName)
     local applied = { attributes = {}, skills = {}, dynamic = {} }
 
     -- Categories intentionally mirror the three getter families exposed by
@@ -195,6 +197,24 @@ function StatTracker.newStatModTracker(actor)
     }
 
     local tracker = {}
+
+    local function reportExternalModifiers()
+        if not sourceName or not interfaces.ErnPerkFramework or not interfaces.ErnPerkFramework.reportExternalModifiers then
+            return
+        end
+        local report = {}
+        for _, stats in pairs(applied) do
+            for id, value in pairs(stats) do
+                if value ~= 0 then
+                    report[id] = (report[id] or 0) + value
+                end
+            end
+        end
+        local ok, err = pcall(interfaces.ErnPerkFramework.reportExternalModifiers, sourceName, next(report) and report or nil)
+        if not ok then
+            print("SkillPerks StatTracker external modifier report failed (" .. tostring(sourceName) .. "): " .. tostring(err))
+        end
+    end
 
     --- @param category string One of "attributes", "skills", "dynamic".
     --- @param id string e.g. "strength", "longblade", "health"
@@ -236,6 +256,7 @@ function StatTracker.newStatModTracker(actor)
         else
             applied[category][id] = newValue
         end
+        reportExternalModifiers()
     end
 
     function tracker.clear(category, id)
@@ -259,6 +280,7 @@ function StatTracker.newStatModTracker(actor)
             end
         end
         applied = { attributes = {}, skills = {}, dynamic = {} }
+        reportExternalModifiers()
     end
 
     function tracker.snapshot()

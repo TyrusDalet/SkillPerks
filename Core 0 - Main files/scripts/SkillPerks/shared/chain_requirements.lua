@@ -19,18 +19,17 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 --[[
     chain_requirements.lua
 
-    All 27 skills across all three design docs (Combat/Stealth/Magic)
-    share the exact same 10-perk slot table:
+    All SkillPerks skills share the same 10-perk slot table:
 
         A1 (25) -> A2 (50) -> A3 (75) -> A4 (100)
         B1 (50) -> B2 (100)
-        C1 (75) / D1 (75)  <- mutually exclusive
-        C2 (100, requires A4+C1) / D2 (100, requires A4+D1)
+        A4 -> C1 (75) / D1 (75)  <- mutually exclusive
+        C1 -> C2 (100) / D1 -> D2 (100)
 
-    See the "Perk Tree Structure" section repeated verbatim at the top of
-    all three SkillPerks_*.md docs. Rather than hand-write this identical
-    prerequisite chain 27 times, ChainRequirements.forSlot() builds it once
-    from a skill id + a table of that skill's own perk ids.
+    Rather than hand-write this prerequisite chain for every skill,
+    ChainRequirements.forSlot() builds it once from a skill id and a table of
+    that skill's own perk ids. A4 is the shared branch point, matching the
+    constellation route shown by every authored skill symbol.
 
     Exclusivity is implemented the same way FactionPerks' dummy.lua demo
     perks 11-13 already demonstrate (invert(hasPerk(other))), not some new
@@ -45,18 +44,135 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 ]]
 
 local interfaces = require("openmw.interfaces")
+local self = require("openmw.self")
+local types = require("openmw.types")
 local MOD_NAME = require("scripts.SkillPerks.namespace")
+local settings = require("scripts.SkillPerks.Settings.settings")
 
 local ChainRequirements = {}
 
--- Skill level required to unlock each slot. Identical across every skill
--- in every one of the three docs - see each doc's "Perk Tree Structure" table.
+-- Skill level required to unlock each slot. The A4 prerequisite makes the C
+-- and D branches effectively mastery choices even though their own tier is 75.
 local SLOT_LEVEL = {
     A1 = 25, A2 = 50, A3 = 75, A4 = 100,
     B1 = 50, B2 = 100,
     C1 = 75, C2 = 100,
     D1 = 75, D2 = 100,
 }
+
+--- Reads SkillPerks menu visibility with a defensive default.
+--- @return number mode Visibility mode selected in SkillPerks settings.
+local function currentVisibilityMode()
+    return tonumber(settings.perkVisibilityMode) or 3
+end
+
+--- Returns the player's base value for a skill.
+--- SkillPerks uses base skill for acquisition, matching Framework
+--- minimumSkillLevel requirements and avoiding temporary buff unlocks.
+--- @param skillId string OpenMW skill id.
+--- @return number value Player base skill value.
+local function getSkillBase(skillId)
+    local getter = types.NPC.stats.skills[skillId]
+    if not getter then
+        return 0
+    end
+    local ok, stat = pcall(getter, self)
+    if not ok or not stat then
+        return 0
+    end
+    return tonumber(stat.base) or 0
+end
+
+--- Checks whether the player currently owns a perk id.
+--- @param perkId string|nil Full Framework perk id.
+--- @return boolean owned True when the player has the perk.
+local function hasPerk(perkId)
+    return perkId ~= nil and interfaces.ErnPerkFramework.playerHasPerk(perkId) == true
+end
+
+--- Checks direct chain prerequisites for visibility mode 4.
+--- This intentionally ignores later perk-specific requirements appended by
+--- individual files; mode 5 handles those by evaluating the final list.
+--- @param perkIds table Skill perk id map.
+--- @param slot string Chain slot.
+--- @return boolean reachable True when the chain path is open.
+local function chainPathReachable(perkIds, slot)
+    if slot == "A2" then
+        return hasPerk(perkIds.A1)
+    elseif slot == "A3" then
+        return hasPerk(perkIds.A2)
+    elseif slot == "A4" then
+        return hasPerk(perkIds.A3)
+    elseif slot == "B2" then
+        return hasPerk(perkIds.B1)
+    elseif slot == "C1" then
+        return hasPerk(perkIds.A4) and not hasPerk(perkIds.D1)
+    elseif slot == "D1" then
+        return hasPerk(perkIds.A4) and not hasPerk(perkIds.C1)
+    elseif slot == "C2" then
+        return hasPerk(perkIds.A4) and hasPerk(perkIds.C1)
+    elseif slot == "D2" then
+        return hasPerk(perkIds.A4) and hasPerk(perkIds.D1)
+    end
+
+    return true
+end
+
+--- Checks the final requirement list, including perk-specific appended gates.
+--- @param reqs table Requirement list returned by forSlot().
+--- @return boolean satisfied True when every non-omitted requirement passes.
+local function allRequirementsSatisfied(reqs)
+    for _, req in ipairs(reqs) do
+        local omitted = false
+        if type(req.omit) == "function" then
+            omitted = req.omit()
+        else
+            omitted = req.omit == true
+        end
+
+        if not omitted and type(req.check) == "function" and not req.check() then
+            return false
+        end
+    end
+    return true
+end
+
+--- Builds the hidden predicate shared by every standard SkillPerks slot.
+---
+--- Visibility modes:
+--- 1: never hidden
+--- 2: hide until the relevant skill reaches 25
+--- 3: hide until the relevant skill reaches this slot's skill tier
+--- 4: hide until skill tier and chain path are reachable
+--- 5: hide until all requirements, including custom appended gates, are met
+--- @param skillId string OpenMW skill id.
+--- @param perkIds table Skill perk id map.
+--- @param slot string Chain slot.
+--- @param reqs table Requirement list returned by forSlot().
+--- @return function hidden Predicate suitable for Framework menu filtering.
+local function hiddenForSlot(skillId, perkIds, slot, reqs)
+    local slotLevel = SLOT_LEVEL[slot] or 100
+
+    return function()
+        local mode = currentVisibilityMode()
+        if mode == 1 then
+            return false
+        end
+
+        local skillBase = getSkillBase(skillId)
+        if mode == 2 then
+            return skillBase < SLOT_LEVEL.A1
+        elseif mode == 3 then
+            return skillBase < slotLevel
+        elseif mode == 4 then
+            return skillBase < slotLevel or not chainPathReachable(perkIds, slot)
+        elseif mode == 5 then
+            return not allRequirementsSatisfied(reqs)
+        end
+
+        return skillBase < slotLevel
+    end
+end
 
 --- @param skillId string OpenMW skill id, e.g. "longblade", "destruction"
 --- @param perkIds table Map of slot name -> full perk id string for THIS skill's
@@ -84,6 +200,7 @@ function ChainRequirements.forSlot(skillId, perkIds, slot)
     elseif slot == "B2" then
         table.insert(reqs, R.hasPerk(perkIds.B1))
     elseif slot == "C1" then
+        table.insert(reqs, R.hasPerk(perkIds.A4))
         -- Mutually exclusive with D1. If the skill has no D chain at all
         -- (shouldn't happen given the framework, but guard anyway),
         -- perkIds.D1 being nil would make hasPerk() error, so only add
@@ -92,6 +209,7 @@ function ChainRequirements.forSlot(skillId, perkIds, slot)
             table.insert(reqs, R.invert(R.hasPerk(perkIds.D1)))
         end
     elseif slot == "D1" then
+        table.insert(reqs, R.hasPerk(perkIds.A4))
         if perkIds.C1 then
             table.insert(reqs, R.invert(R.hasPerk(perkIds.C1)))
         end
@@ -102,6 +220,8 @@ function ChainRequirements.forSlot(skillId, perkIds, slot)
         table.insert(reqs, R.hasPerk(perkIds.A4))
         table.insert(reqs, R.hasPerk(perkIds.D1))
     end
+
+    reqs.hidden = hiddenForSlot(skillId, perkIds, slot, reqs)
 
     return reqs
 end

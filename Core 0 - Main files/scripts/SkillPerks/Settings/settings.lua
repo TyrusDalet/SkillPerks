@@ -22,6 +22,8 @@ local LONG_BLADE_HUD_SECTION = SECTION .. "LongBladeHUD"
 
 local DEFAULTS = {
     enableLogging = false,
+    debugVerbosity = 0,
+    perkVisibilityMode = 3,
     disable = false,
 }
 
@@ -57,11 +59,28 @@ local function init()
                 renderer = "checkbox",
             },
             {
-                key = "enableLogging",
-                name = "enableLoggingName",
-                description = "enableLoggingDescription",
-                default = DEFAULTS.enableLogging,
-                renderer = "checkbox",
+                key = "perkVisibilityMode",
+                name = "perkVisibilityModeName",
+                description = "perkVisibilityModeDescription",
+                default = DEFAULTS.perkVisibilityMode,
+                renderer = "number",
+                argument = {
+                    integer = true,
+                    min = 1,
+                    max = 5,
+                },
+            },
+            {
+                key = "debugVerbosity",
+                name = "debugVerbosityName",
+                description = "debugVerbosityDescription",
+                default = DEFAULTS.debugVerbosity,
+                renderer = "number",
+                argument = {
+                    integer = true,
+                    min = 0,
+                    max = 3,
+                },
             },
         },
     }

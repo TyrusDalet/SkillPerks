@@ -38,19 +38,69 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
         this actor attachment again.
         Harmless no-op overhead until a perk actually forces a stagger/
         knockdown animation on this actor.
-
-    COMBAT HIT HANDLING: OpenMW delivers onHit callbacks to the target's
-    local script. For player-owned perk state such as Long Blade Momentum,
-    this file forwards player outgoing hits back to the player's SkillPerks
-    scripts after the framework's target-side hit pipeline sees them.
 ]]
 
 local interfaces = require("openmw.interfaces")
-local pself = require("openmw.self")
 local types = require("openmw.types")
+local nearby = require("openmw.nearby")
+local pself = require("openmw.self")
 
 local Stagger = require("scripts.SkillPerks.shared.stagger")
-local hitForwarderRegistered = false
+
+--- Returns the single-player actor object from the world player list.
+--- Kept as a helper so multiplayer support later has one obvious seam.
+--- @return GameObject|nil player
+local function getPlayer()
+    return nearby.players[1]
+end
+
+--- Returns true when the target-local hit payload belongs to the player.
+--- @param attack table OpenMW combat hit payload.
+--- @param player GameObject Player actor.
+--- @return boolean result
+local function isPlayerOwnedHit(attack, player)
+    if not attack or not player then
+        return false
+    end
+    if attack.attacker == player then
+        return true
+    end
+    if attack.attacker ~= nil or not attack.weapon then
+        return false
+    end
+    return attack.weapon == types.Actor.getEquipment(player, types.Actor.EQUIPMENT_SLOT.CarriedRight)
+end
+
+--- Sends player-owned hits on this NPC back to the player script.
+--- OpenMW delivers local on-hit callbacks to the actor being hit. Player
+--- perk files need their own player-local state, so target actors act as a
+--- small bridge rather than trying to modify player state from here.
+--- @param attack table OpenMW combat hit payload.
+local function forwardPlayerHit(attack)
+    local player = getPlayer()
+    if not isPlayerOwnedHit(attack, player) then
+        return
+    end
+    player:sendEvent("SPerks_PlayerHitActor", {
+        attacker = attack.attacker or player,
+        target = attack.target or attack.victim or attack.defender or pself,
+        victim = attack.victim,
+        defender = attack.defender,
+        weapon = attack.weapon,
+        ammo = attack.ammo,
+        successful = attack.successful,
+        damage = attack.damage,
+        strength = attack.strength,
+        type = attack.type,
+        sourceType = attack.sourceType,
+        critical = attack.critical,
+        isCritical = attack.isCritical,
+    })
+end
+
+if interfaces.Combat and interfaces.Combat.addOnHitHandler then
+    interfaces.Combat.addOnHitHandler(forwardPlayerHit)
+end
 
 --- Returns the framework interface after local actor interfaces have attached.
 --- NPC scripts can start before another local script's interface is visible,
@@ -103,42 +153,7 @@ local function takeFatigue(data)
     })
 end
 
---- Registers a target-side onHit bridge once the framework actor interface
---- exists. The forwarded payload is intentionally small and serializable:
---- player scripts only need hit metadata and object references, not the live
---- mutable attack table.
-local function registerPlayerHitForwarder()
-    if hitForwarderRegistered then
-        return
-    end
-    if interfaces.Combat == nil then
-        return
-    end
-    hitForwarderRegistered = true
-    interfaces.Combat.addOnHitHandler(function(attack)
-        local attacker = attack.attacker
-        if not attacker or not attacker:isValid() or not types.Player.objectIsInstance(attacker) then
-            return
-        end
-        attacker:sendEvent("SPerks_PlayerHitActor", {
-            target = pself,
-            weapon = attack.weapon,
-            armor = attack.armor,
-            successful = attack.successful,
-            strength = attack.strength,
-            sourceType = attack.sourceType,
-            type = attack.type,
-            damage = attack.damage and {
-                health = attack.damage.health,
-                fatigue = attack.damage.fatigue,
-                magicka = attack.damage.magicka,
-            } or nil,
-        })
-    end)
-end
-
-local function onUpdate(dt)
-    registerPlayerHitForwarder()
+local function onUpdate()
     Stagger.checkStaggerState()
 end
 
