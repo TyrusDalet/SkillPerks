@@ -140,34 +140,19 @@ local function completedTexture(texture)
     return texture:gsub("%.dds$", "_complete.dds")
 end
 
---- Builds progressive lighting metadata from the same four chains represented
---- in the DDS. Consecutive owned ranks illuminate their connecting stroke, and
---- the mutually exclusive C and D branches both begin at A4.
+--- Builds restrained progressive star lighting from the same four chains
+--- represented in the DDS. The authored texture already contains its routes,
+--- so SkillPerks does not add a second set of ownership connection lines.
 local function buildOwnershipHighlights(definition)
     local nodeColors = {}
-    local links = {}
     for chain, ranks in pairs(chainRanks) do
         local color = chainColors[chain]
-        for index, rank in ipairs(ranks) do
+        for _, rank in ipairs(ranks) do
             local id = perkId(definition, rank)
             nodeColors[id] = color
-            if index > 1 then
-                table.insert(links, {
-                    from = perkId(definition, ranks[index - 1]),
-                    to = id,
-                    color = color,
-                })
-            end
         end
     end
-    for _, branch in ipairs({ "C", "D" }) do
-        table.insert(links, {
-            from = perkId(definition, "A4"),
-            to = perkId(definition, branch .. "1"),
-            color = chainColors[branch],
-        })
-    end
-    return nodeColors, links
+    return nodeColors
 end
 
 --- Registers one Stealth skill's visual definition immediately before that
@@ -184,7 +169,7 @@ local function registerStealthConstellation(skillName)
     for rank, point in pairs(definition.points) do
         positions[perkId(definition, rank)] = point
     end
-    local ownedNodeColors, ownedLinks = buildOwnershipHighlights(definition)
+    local ownedNodeColors = buildOwnershipHighlights(definition)
     interfaces.ErnPerkFramework.registerConstellation({
         mod = "SkillPerks",
         type = "Stealth",
@@ -194,7 +179,6 @@ local function registerStealthConstellation(skillName)
         completedTexture = completedTexture(definition.texture),
         positions = positions,
         ownedNodeColors = ownedNodeColors,
-        ownedLinks = ownedLinks,
         suppressInternalDependencyLines = true,
     })
     return true

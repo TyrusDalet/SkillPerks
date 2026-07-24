@@ -16,16 +16,16 @@ Hover a node for its name, flavour text, effects, cost, and current state. Hold
 left mouse to acquire an available node, or hold right mouse on an owned node
 to refund it and any dependent perks.
 
-Each acquired node lights in its chain colour, as does the connection from the
-previous acquired rank. The C and D branches both visibly begin at A4 and keep
-their separate aggression and control colours. Internal generated dependency
-lines are hidden because those links are already authored into the texture;
+Each acquired node receives a restrained highlight in its chain colour. Core 2
+does not add progressive connection overlays: the C and D routes already visibly
+begin at A4 in the authored texture and keep their separate aggression and
+control colours. Internal generated dependency lines are hidden, while
 cross-constellation dependencies remain available to the framework.
 
 Completing every compatible node swaps the subdued skill symbol for a paired
 blue-white glowing texture. The completion asset preserves the same node
-alignment and branch colours, and the mutually exclusive blocked branch is not
-required for completion.
+alignment and branch colours, but dims the routes so the completed symbol reads
+first. The mutually exclusive blocked branch is not required for completion.
 
 The classic perk menu remains the default and is unaffected when constellation
 display is disabled.
