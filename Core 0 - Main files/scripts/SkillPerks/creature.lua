@@ -36,6 +36,7 @@ local nearby = require("openmw.nearby")
 local pself = require("openmw.self")
 
 local Stagger = require("scripts.SkillPerks.shared.stagger")
+local MagicTarget = require("scripts.SkillPerks.shared.magic_target")
 
 --- Returns the single-player actor object from the world player list.
 --- @return GameObject|nil player
@@ -137,16 +138,34 @@ local function takeFatigue(data)
     })
 end
 
-local function onUpdate()
-    Stagger.checkStaggerState()
+--- Applies direct Magicka damage through the shared resource pipeline.
+local function takeMagicka(data)
+    data = data or {}
+    local fw = framework()
+    if fw == nil then return end
+    fw.applyActorResourceDelta({
+        actor = pself, resource = "magicka",
+        operation = fw.RESOURCE_OPERATION.Damage,
+        amount = data.amount or 0, source = data.source,
+        sourceEffect = data.sourceEffect, damageType = data.damageType,
+        context = data,
+    })
 end
 
+local function onUpdate(dt)
+    Stagger.checkStaggerState()
+    MagicTarget.onUpdate(dt)
+end
+
+local magicHandlers = MagicTarget.eventHandlers()
+magicHandlers.SPerks_TakeDamage = takeDamage
+magicHandlers.SPerks_TakeFatigue = takeFatigue
+magicHandlers.SPerks_TakeMagicka = takeMagicka
+
 return {
-    eventHandlers = {
-        SPerks_TakeDamage = takeDamage,
-        SPerks_TakeFatigue = takeFatigue,
-    },
+    eventHandlers = magicHandlers,
     engineHandlers = {
         onUpdate = onUpdate,
+        onDeath = MagicTarget.onDeath,
     },
 }

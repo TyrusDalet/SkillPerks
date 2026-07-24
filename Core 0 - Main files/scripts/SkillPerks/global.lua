@@ -220,6 +220,19 @@ end
 interfaces.Activation.addHandlerForType(types.Door, onSecurityLockableActivated)
 interfaces.Activation.addHandlerForType(types.Container, onSecurityLockableActivated)
 
+--- Relays actor activation to the activating player. Mysticism decides
+--- player-locally whether Telekinetic Force is active and whether the actor
+--- is hostile, so this global bridge never suppresses vanilla activation.
+local function onMagicActorActivated(target, actor)
+    if actor and types.Player.objectIsInstance(actor) then
+        actor:sendEvent("SPerks_MagicActorActivated", { target = target })
+    end
+    return true
+end
+
+interfaces.Activation.addHandlerForType(types.NPC, onMagicActorActivated)
+interfaces.Activation.addHandlerForType(types.Creature, onMagicActorActivated)
+
 -- ============================================================
 --  DYNAMIC SPELL CREATION + APPLICATION
 -- ============================================================
