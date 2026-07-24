@@ -1,0 +1,12 @@
+# SkillPerks - Core 3 (Magic)
+# Requires ErnPerkFramework, Inventory Extender, and SkillPerks Core 0.
+
+PLAYER:scripts/SPerks_Alchemy.lua
+PLAYER:scripts/SPerks_Alteration.lua
+PLAYER:scripts/SPerks_Conjuration.lua
+PLAYER:scripts/SPerks_Destruction.lua
+PLAYER:scripts/SPerks_Enchant.lua
+PLAYER:scripts/SPerks_Illusion.lua
+PLAYER:scripts/SPerks_Mysticism.lua
+PLAYER:scripts/SPerks_Restoration.lua
+PLAYER:scripts/SPerks_Unarmored.lua
