@@ -21,7 +21,6 @@ local updateTimer = 0
 local echoedTargets = {}
 
 local function rank(chain) return Common.rank(ids, chain) end
-local function isKnownSpell(id) return id and types.Actor.spells(self)[id] ~= nil end
 
 local function soulValue(target)
     if types.Creature.objectIsInstance(target) then
@@ -65,7 +64,8 @@ local function distributeCharge(amount)
 end
 
 local function onSpellLanded(data)
-    if not data or not data.target or not data.target:isValid() or not isKnownSpell(data.spellId) then return end
+    if not data or not data.target or not data.target:isValid()
+            or not Common.isPlayerCastLandedSpell(data) then return end
     local soultrap
     for _, effect in ipairs(data.effects or {}) do
         if effect.id == "soultrap" then soultrap = effect break end

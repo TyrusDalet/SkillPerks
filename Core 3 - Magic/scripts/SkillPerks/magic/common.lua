@@ -13,6 +13,7 @@ local types = require("openmw.types")
 local ns = require("scripts.SkillPerks.namespace")
 local ChainRequirements = require("scripts.SkillPerks.shared.chain_requirements")
 local MagicConstellations = require("scripts.SkillPerks.constellations.magic")
+local MagicDetection = require("scripts.SkillPerks.shared.magic_detection")
 
 local Common = {}
 local SLOT_ORDER = { "A1", "A2", "A3", "A4", "B1", "B2", "C1", "C2", "D1", "D2" }
@@ -63,10 +64,9 @@ function Common.getEffectMagnitude(actor, effectId, extraParam)
 end
 
 function Common.playerSpellEffectMagnitude(actor, effectId, extraParam)
-    local known = types.Actor.spells(actor)
     local total = 0
     for _, spell in pairs(types.Actor.activeSpells(actor)) do
-        if spell.item == nil and known[spell.id] then
+        if MagicDetection.isPlayerCastActiveSpell(actor, spell) then
             for _, effect in pairs(spell.effects or {}) do
                 if effect.id == effectId
                         and (extraParam == nil
@@ -82,6 +82,22 @@ end
 
 function Common.hasPlayerSpellEffect(actor, effectId)
     return Common.playerSpellEffectMagnitude(actor, effectId) ~= 0
+end
+
+--- Shared source policy for school scripts handling target-landed effects.
+--- Item-source exceptions should remain explicit in the owning perk.
+function Common.isPlayerCastLandedSpell(data)
+    return MagicDetection.isPlayerCastLandedSpell(data)
+end
+
+--- Shared source policy for school scripts polling the player's active magic.
+function Common.isPlayerCastActiveSpell(actor, activeSpell)
+    return MagicDetection.isPlayerCastActiveSpell(actor, activeSpell)
+end
+
+--- Cast-window helper for selected spells that have not landed yet.
+function Common.actorKnowsCastableSpell(actor, spell)
+    return MagicDetection.actorKnowsCastableSpell(actor, spell)
 end
 
 function Common.dynamicRatio(actor, resource)

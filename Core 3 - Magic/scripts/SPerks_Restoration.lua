@@ -8,10 +8,17 @@ remaining damage is committed to the actor.
 ]]
 
 local interfaces = require("openmw.interfaces")
+local core = require("openmw.core")
 local types = require("openmw.types")
 local self = require("openmw.self")
+local ui = require("openmw.ui")
 
 local Common = require("scripts.SkillPerks.magic.common")
+local MagicDetection = require("scripts.SkillPerks.shared.magic_detection")
+local WardHud = require("scripts.SkillPerks.hud.ward")
+local settings = require("scripts.SkillPerks.Settings.settings")
+
+settings.registerWardHudSettings()
 
 local ids = Common.ids("restoration")
 local states = {
@@ -20,6 +27,15 @@ local states = {
 }
 local updateTimer = 0
 local clearMindTimer = 1
+local debugState = {
+    lastCast = nil,
+    lastRestoreEffect = nil,
+    lastSpellforgeEffect = nil,
+}
+local spellforgeSnapshots = {}
+local spellforgeAuthorized = {}
+local spellforgeInstantHandled = {}
+local pendingSpellforgeCast = nil
 
 local function rank(chain) return Common.rank(ids, chain) end
 local function maximum(resource)
@@ -35,6 +51,32 @@ end
 local function inflictionTime()
     local a = rank("A")
     return a >= 4 and 5 or a >= 2 and 3 or 2
+end
+
+--- Packages Restoration's live reserve values for its mod-owned HUD.
+--- Available reserve and dissipating reserve remain separate so the player can
+--- tell how much protection can answer the next hit.
+local function getWardHudState()
+    local a = rank("A")
+    local healthCap = cap("health")
+    local result = {
+        enabled = a > 0 and healthCap > 0,
+        health = {
+            label = "Health",
+            available = states.health.buffer,
+            dissipating = states.health.drain,
+            maximum = healthCap,
+        },
+    }
+    if a >= 3 then
+        result.fatigue = {
+            label = "Fatigue",
+            available = states.fatigue.buffer,
+            dissipating = states.fatigue.drain,
+            maximum = cap("fatigue"),
+        }
+    end
+    return result
 end
 
 -- Overflow first cancels outstanding Drain, then becomes settled Buffer.
@@ -82,6 +124,38 @@ interfaces.ErnPerkFramework.registerSkillUseHandler({
     id="SkillPerks_restoration_linked_restore",
     skill="restoration", playerCastOnly=true,
     handler=function(event)
+        local restoreEffects = {}
+        for _, effect in ipairs(event.spell and event.spell.effects or {}) do
+            if effect.id == "restorehealth" or effect.id == "restorefatigue" then
+                table.insert(restoreEffects, {
+                    id=effect.id,
+                    magnitude=Common.averageMagnitude(effect),
+                    duration=tonumber(effect.duration) or 0,
+                    range=effect.range,
+                })
+            end
+        end
+        debugState.lastCast = {
+            id=event.spell and event.spell.id or nil,
+            name=event.spell and event.spell.name or nil,
+            spellforge=MagicDetection.isSpellforgeRecord(event.spell),
+            effectCount=#restoreEffects,
+            effects=restoreEffects,
+        }
+        if debugState.lastCast.spellforge then
+            pendingSpellforgeCast = {
+                healthMissing=math.max(
+                    0,
+                    maximum("health") - types.Actor.stats.dynamic.health(self).current
+                ),
+                fatigueMissing=math.max(
+                    0,
+                    maximum("fatigue") - types.Actor.stats.dynamic.fatigue(self).current
+                ),
+                expires=core.getSimulationTime() + 3,
+            }
+        end
+
         local b = rank("B")
         if b == 0 or not event.spell then return end
         for _, effect in ipairs(event.spell.effects or {}) do
@@ -107,11 +181,25 @@ interfaces.ErnPerkFramework.registerSkillUseHandler({
 local function playerRestorePerSecond(resource)
     local id = "restore" .. resource
     local total = 0
-    local known = types.Actor.spells(self)
+    local now = core.getSimulationTime()
     for _, spell in pairs(types.Actor.activeSpells(self)) do
-        if spell.item == nil and known[spell.id] then
-            for _, effect in pairs(spell.effects or {}) do
-                if effect.id == id then total = total + math.max(0, tonumber(effect.magnitudeThisFrame) or 0) end
+        local spellId = tostring(spell.id or "")
+        local qualifies = Common.isPlayerCastActiveSpell(self, spell)
+            or (spellforgeAuthorized[spellId] or 0) >= now
+        local instantHandled = (spellforgeInstantHandled[spellId] or 0) >= now
+        for _, effect in pairs(spell.effects or {}) do
+            if effect.id == id then
+                local source = MagicDetection.describeActiveSpellSource(self, spell)
+                source.spellforgeAuthorized = (spellforgeAuthorized[spellId] or 0) >= now
+                source.spellforgeInstantHandled = instantHandled
+                source.effectId = effect.id
+                source.magnitude = effect.magnitudeThisFrame
+                source.duration = effect.duration
+                source.durationLeft = effect.durationLeft
+                debugState.lastRestoreEffect = source
+                if qualifies and not instantHandled then
+                    total = total + math.max(0, tonumber(effect.magnitudeThisFrame) or 0)
+                end
             end
         end
     end
@@ -130,6 +218,68 @@ local function collectOverflow(dt)
             addOverflow(resource, math.max(0, delivered - missing))
         end
     end
+end
+
+--- Remembers the exact amount missing immediately before Spell Framework Plus
+--- applies a self-targeted Spellforge spell. Instant effects can disappear
+--- before the normal active-spell poll, so this snapshot is required to
+--- separate actual healing from Ward-generating overflow.
+local function onSpellforgeMagicHit(data)
+    data = data or {}
+    if not data.spellId then return end
+    local now = core.getSimulationTime()
+    if pendingSpellforgeCast and pendingSpellforgeCast.expires >= now then
+        spellforgeSnapshots[tostring(data.spellId)] = pendingSpellforgeCast
+        return
+    end
+    spellforgeSnapshots[tostring(data.spellId)] = {
+        healthMissing=math.max(0, tonumber(data.healthMissing) or 0),
+        fatigueMissing=math.max(0, tonumber(data.fatigueMissing) or 0),
+        expires=now + 1,
+    }
+end
+
+--- Accepts SFP's confirmed application of a Spellforge effect. Duration
+--- effects authorize the ordinary active-spell poll; instant restores are
+--- resolved immediately from the pre-application snapshot because OpenMW may
+--- remove them before the next player-script update.
+local function onSpellforgeEffectApplied(data)
+    data = data or {}
+    local spellId = tostring(data.spellId or "")
+    local effectId = tostring(data.effectId or ""):lower()
+    local duration = math.max(0, tonumber(data.duration) or 0)
+    local magnitude = math.max(0, tonumber(data.magnitude) or 0)
+    local now = core.getSimulationTime()
+    local snapshot = spellforgeSnapshots[spellId]
+    if spellId == "" or not snapshot or snapshot.expires < now then
+        return
+    end
+
+    spellforgeAuthorized[spellId] = now + math.max(1, duration + 0.5)
+    debugState.lastSpellforgeEffect = {
+        spellId = spellId,
+        effectId = effectId,
+        magnitude = magnitude,
+        duration = duration,
+        snapshotFound = true,
+    }
+
+    local resource = effectId == "restorehealth" and "health"
+        or effectId == "restorefatigue" and "fatigue"
+        or nil
+    if not resource or duration > 0 then
+        return
+    end
+
+    local missingKey = resource .. "Missing"
+    local missing = math.max(0, tonumber(snapshot[missingKey]) or 0)
+    local restored = math.min(missing, magnitude)
+    snapshot[missingKey] = missing - restored
+    addOverflow(resource, magnitude - restored)
+
+    -- Suppress the polling fallback if OpenMW keeps this zero-duration effect
+    -- visible for one frame; its full magnitude was already resolved above.
+    spellforgeInstantHandled[spellId] = now + 0.5
 end
 
 local function updateStates(dt)
@@ -222,9 +372,98 @@ interfaces.ErnPerkFramework.registerOnHitHandler({
 local function clear()
     states={health={buffer=0,drain=0,window=0,idle=0},fatigue={buffer=0,drain=0,window=0,idle=0}}
     attributeSessions={}
+    spellforgeSnapshots={}
+    spellforgeAuthorized={}
+    spellforgeInstantHandled={}
+    pendingSpellforgeCast=nil
+    WardHud.forceUpdate(getWardHudState())
+end
+
+local function consolePrint(message)
+    ui.printToConsole(tostring(message), ui.CONSOLE_COLOR.Default)
+end
+
+--- Reports the successful cast and active-effect sides of Ward collection.
+--- Use after casting a Restore spell to diagnose generated-spell interop.
+local function onConsoleCommand(mode, command)
+    command = tostring(command or ""):lower():match("^%s*(.-)%s*$")
+    if command ~= "luarest debug" then return end
+
+    local cast = debugState.lastCast
+    if cast then
+        consolePrint("Restoration last cast:"
+            .. " id=" .. tostring(cast.id)
+            .. " name=" .. tostring(cast.name)
+            .. " spellforge=" .. tostring(cast.spellforge)
+            .. " restoreEffects=" .. tostring(cast.effectCount))
+        for _, effect in ipairs(cast.effects or {}) do
+            consolePrint("  cast effect:"
+                .. " id=" .. tostring(effect.id)
+                .. " magnitude=" .. tostring(effect.magnitude)
+                .. " duration=" .. tostring(effect.duration)
+                .. " range=" .. tostring(effect.range))
+        end
+    else
+        consolePrint("Restoration last cast: none received by framework.")
+    end
+
+    local active = debugState.lastRestoreEffect
+    if active then
+        consolePrint("Restoration last active Restore effect:"
+            .. " id=" .. tostring(active.id)
+            .. " name=" .. tostring(active.name)
+            .. " activeId=" .. tostring(active.activeSpellId)
+            .. " caster=" .. tostring(active.caster)
+            .. " casterIsPlayer=" .. tostring(active.casterIsActor)
+            .. " item=" .. tostring(active.item)
+            .. " recordFound=" .. tostring(active.recordFound)
+            .. " recordType=" .. tostring(active.recordType)
+            .. " recordName=" .. tostring(active.recordName))
+        consolePrint("  source:"
+            .. " known=" .. tostring(active.known)
+            .. " spellforge=" .. tostring(active.spellforge)
+            .. " sfpAuthorized=" .. tostring(active.spellforgeAuthorized)
+            .. " sfpInstantHandled=" .. tostring(active.spellforgeInstantHandled)
+            .. " qualifies=" .. tostring(active.qualifies)
+            .. " effect=" .. tostring(active.effectId)
+            .. " magnitude=" .. tostring(active.magnitude)
+            .. " duration=" .. tostring(active.duration)
+            .. " left=" .. tostring(active.durationLeft))
+    else
+        consolePrint("Restoration active Restore effect: none observed by Ward polling.")
+    end
+    local sfp = debugState.lastSpellforgeEffect
+    if sfp then
+        consolePrint("Restoration last Spellforge/SFP effect:"
+            .. " spellId=" .. tostring(sfp.spellId)
+            .. " effect=" .. tostring(sfp.effectId)
+            .. " magnitude=" .. tostring(sfp.magnitude)
+            .. " duration=" .. tostring(sfp.duration)
+            .. " snapshot=" .. tostring(sfp.snapshotFound))
+    else
+        consolePrint("Restoration Spellforge/SFP effect: none relayed.")
+    end
+    consolePrint("Ward buffers:"
+        .. " health=" .. tostring(states.health.buffer)
+        .. " healthDrain=" .. tostring(states.health.drain)
+        .. " fatigue=" .. tostring(states.fatigue.buffer)
+        .. " fatigueDrain=" .. tostring(states.fatigue.drain))
 end
 
 local function onUpdate(dt)
+    local now = core.getSimulationTime()
+    for spellId, snapshot in pairs(spellforgeSnapshots) do
+        if snapshot.expires < now then spellforgeSnapshots[spellId] = nil end
+    end
+    for spellId, expires in pairs(spellforgeAuthorized) do
+        if expires < now then spellforgeAuthorized[spellId] = nil end
+    end
+    for spellId, expires in pairs(spellforgeInstantHandled) do
+        if expires < now then spellforgeInstantHandled[spellId] = nil end
+    end
+    if pendingSpellforgeCast and pendingSpellforgeCast.expires < now then
+        pendingSpellforgeCast = nil
+    end
     collectOverflow(dt)
     updateStates(dt)
     updateAttributeSessions(dt)
@@ -234,6 +473,7 @@ local function onUpdate(dt)
         clearMind()
     end
     updateTimer = updateTimer + dt
+    WardHud.update(getWardHudState())
 end
 
 Common.registerMagicPerks("restoration", "Restoration", ids, {
@@ -250,12 +490,18 @@ Common.registerMagicPerks("restoration", "Restoration", ids, {
 })
 
 return {
+    eventHandlers={
+        SPerks_SpellforgeMagicHit=onSpellforgeMagicHit,
+        SPerks_SpellforgeEffectApplied=onSpellforgeEffectApplied,
+    },
     engineHandlers={
         onUpdate=onUpdate,
+        onConsoleCommand=onConsoleCommand,
         onSave=function() return {states=states,sessions=attributeSessions} end,
         onLoad=function(data)
             states=(data and data.states) or states
             attributeSessions=(data and data.sessions) or {}
+            WardHud.forceUpdate(getWardHudState())
         end,
     },
 }

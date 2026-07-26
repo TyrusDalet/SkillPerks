@@ -22,7 +22,6 @@ local reflectedSeen={}
 local reflectionTimer=0
 
 local function rank(chain) return Common.rank(ids,chain) end
-local function knownSpell(id) return id and types.Actor.spells(self)[id] ~= nil end
 local function targetRatio(target,resource)
     local stat=types.Actor.stats.dynamic[resource](target)
     local maximum=math.max((stat.base or 0)+(stat.modifier or 0),1)
@@ -62,7 +61,7 @@ local function onSpellLanded(data)
     local target=data and data.target
     if not target or not target:isValid() then return end
     local c=rank("C")
-    local playerCast=knownSpell(data.spellId)
+    local playerCast=Common.isPlayerCastLandedSpell(data)
     if not playerCast and c == 0 then return end
     local a,b,d=rank("A"),rank("B"),rank("D")
     local sourceCost=castCosts[data.spellId] or 0

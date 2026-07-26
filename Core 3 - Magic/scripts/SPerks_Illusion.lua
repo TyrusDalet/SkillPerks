@@ -22,7 +22,6 @@ local pendingChecks, thefts = {}, {}
 local pollTimer = 0
 
 local function rank(chain) return Common.rank(ids, chain) end
-local function isKnownSpell(id) return id and types.Actor.spells(self)[id] ~= nil end
 local function hasEffect(data, id)
     for _, effect in ipairs(data.effects or {}) do
         if effect.id == id then return effect end
@@ -46,7 +45,8 @@ local function onMindTheftDelta(data)
 end
 
 local function onSpellLanded(data)
-    if not data or not data.target or not data.target:isValid() or not isKnownSpell(data.spellId) then return end
+    if not data or not data.target or not data.target:isValid()
+            or not Common.isPlayerCastLandedSpell(data) then return end
     if rank("A") >= 3 and hasEffect(data, "paralyze") then
         data.target:sendEvent("SPerks_IllusionMindTheft", {
             caster = self, activeSpellId = data.activeSpellId,

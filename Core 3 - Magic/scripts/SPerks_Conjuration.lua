@@ -88,7 +88,8 @@ interfaces.AnimationController.addTextKeyHandler("", function(group, key)
     if group ~= "spellcast" then return end
     if key == "self start" or key == "touch start" or key == "target start" then
         local spell = types.Player.getSelectedSpell(self)
-        if spell and #summonEffects(spell) > 0 then
+        if Common.actorKnowsCastableSpell(self, spell)
+                and #summonEffects(spell) > 0 then
             castActors, summonCast = actorSnapshot(), spell
             castExpiresAt = core.getSimulationTime() + 3
             trackingSource = "animation"
@@ -173,7 +174,9 @@ end
 local function refreshPassives()
     local a = rank("A")
     local selected = types.Player.getSelectedSpell(self)
-    effects.apply("sound",nil,a > 0 and #summonEffects(selected) > 0
+    local selectedSummon = Common.actorKnowsCastableSpell(self, selected)
+        and #summonEffects(selected) > 0
+    effects.apply("sound",nil,a > 0 and selectedSummon
         and ({-5,-10,-15,-25})[a] or 0)
 
     local c = rank("C")

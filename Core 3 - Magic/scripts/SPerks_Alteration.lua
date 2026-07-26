@@ -23,15 +23,6 @@ local updateTimer = 0
 
 local function rank(chain) return Common.rank(ids, chain) end
 
-local function selectedHas(effectId)
-    local spell = types.Player.getSelectedSpell(self)
-    if not spell then return false end
-    for _, effect in ipairs(spell.effects or {}) do
-        if effect.id == effectId then return true end
-    end
-    return false
-end
-
 -- A-chain pairings remain active only for the lifetime of the corresponding
 -- player-cast Alteration effect, so consumables cannot enable them.
 local function refreshPairedEffects()
@@ -85,7 +76,7 @@ interfaces.ErnPerkFramework.registerSkillUseHandler({
 
 local function onSpellLanded(data)
     if rank("A") < 3 or not data or not data.target or not data.target:isValid() then return end
-    if not data.spellId or not types.Actor.spells(self)[data.spellId] then return end
+    if not Common.isPlayerCastLandedSpell(data) then return end
     for _, effect in ipairs(data.effects or {}) do
         if effect.id == "burden" then
             local duration = math.max(1, tonumber(effect.duration) or 1)
