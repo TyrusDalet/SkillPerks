@@ -43,6 +43,92 @@ local interfaces = require("openmw.interfaces")
 
 local MagicDetection = {}
 
+--- Resolves either a spell record or record ID to a live spell record.
+--- Generated records, including Spellforge helpers, resolve through the same
+--- database as vanilla and player-created spells.
+local function spellRecord(spellOrId)
+    if spellOrId == nil then return nil end
+    local id = type(spellOrId) == "string" and spellOrId or spellOrId.id
+    if not id then return nil end
+    return core.magic.spells.records[id]
+end
+
+--- Recognizes generated records that represent a Spellforge cast rather than
+--- a secondary scripted effect. Spellforge's front-end records are added to
+--- the spellbook; its runtime helper records retain this ID or name marker.
+function MagicDetection.isSpellforgeRecord(spellOrId)
+    local record = spellRecord(spellOrId)
+    if not record then return false end
+    local id = tostring(record.id or ""):lower()
+    local name = tostring(record.name or ""):lower()
+    return id:find("^spellforge_") ~= nil
+        or name:find("^spellforge ") ~= nil
+end
+
+--- Returns whether a record represents magic that the player actively casts.
+--- Powers are deliberate casts; passive abilities, diseases, blights, and
+--- curses are not.
+function MagicDetection.isCastableSpellRecord(spellOrId)
+    local record = spellRecord(spellOrId)
+    if not record then return false end
+    return record.type == core.magic.SPELL_TYPE.Spell
+        or record.type == core.magic.SPELL_TYPE.Power
+end
+
+--- Returns whether an active effect came from a qualifying cast by `actor`.
+--- Spellbook membership admits ordinary casts, while the explicit Spellforge
+--- marker admits its runtime helpers without admitting unrelated scripted
+--- secondary effects.
+function MagicDetection.isPlayerCastActiveSpell(actor, activeSpell)
+    if actor == nil or activeSpell == nil or activeSpell.item ~= nil
+            or activeSpell.caster ~= actor then
+        return false
+    end
+    local record = spellRecord(activeSpell.id)
+    if not MagicDetection.isCastableSpellRecord(record) then return false end
+    return types.Actor.spells(actor)[record.id] ~= nil
+        or MagicDetection.isSpellforgeRecord(record)
+end
+
+--- Describes every field used by the shared source decision. This keeps
+--- school-specific diagnostics readable without duplicating classification.
+function MagicDetection.describeActiveSpellSource(actor, activeSpell)
+    local record = activeSpell and spellRecord(activeSpell.id) or nil
+    local known = actor ~= nil and record ~= nil
+        and types.Actor.spells(actor)[record.id] ~= nil or false
+    return {
+        id = activeSpell and activeSpell.id or nil,
+        name = activeSpell and activeSpell.name or nil,
+        activeSpellId = activeSpell and activeSpell.activeSpellId or nil,
+        caster = activeSpell and activeSpell.caster or nil,
+        casterIsActor = activeSpell ~= nil and activeSpell.caster == actor,
+        item = activeSpell and activeSpell.item or nil,
+        recordFound = record ~= nil,
+        recordType = record and record.type or nil,
+        recordName = record and record.name or nil,
+        known = known,
+        spellforge = MagicDetection.isSpellforgeRecord(record),
+        qualifies = MagicDetection.isPlayerCastActiveSpell(actor, activeSpell),
+    }
+end
+
+--- Returns whether a landed-effect event represents qualifying player magic.
+--- Core 0's target bridge computes this once from the complete ActiveSpell,
+--- preserving the same source decision for every school that receives it.
+function MagicDetection.isPlayerCastLandedSpell(data)
+    return data ~= nil and data.isPlayerCast == true
+end
+
+--- Returns whether the actor knows the selected castable spell.
+--- This is appropriate while observing a cast animation, before an active
+--- effect exists and exposes its caster.
+function MagicDetection.actorKnowsCastableSpell(actor, spell)
+    if actor == nil or not MagicDetection.isCastableSpellRecord(spell) then
+        return false
+    end
+    return types.Actor.spells(actor)[spell.id] ~= nil
+end
+
 -- ============================================================
 --  ENCHANTMENT RECORD HELPERS
 --  Originally established in FactionPerks' FPerks_HT.lua
@@ -112,7 +198,7 @@ function MagicDetection.newCastTracker(actor)
         if key == "self start" or key == "touch start" or key == "target start" then
             local spell = types.Actor.getSelectedSpell(actor)
             if spell
-                and types.Actor.spells(actor)[spell.id]
+                and MagicDetection.actorKnowsCastableSpell(actor, spell)
                 and types.Actor.getSelectedEnchantedItem(actor) == nil then
                 tracker.currentSpell = spell
                 tracker.currentCost = spell.cost or 0

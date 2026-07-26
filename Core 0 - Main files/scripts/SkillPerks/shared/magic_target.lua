@@ -12,6 +12,7 @@ local types = require("openmw.types")
 local pself = require("openmw.self")
 
 local Stagger = require("scripts.SkillPerks.shared.stagger")
+local MagicDetection = require("scripts.SkillPerks.shared.magic_detection")
 
 local MagicTarget = {}
 local seen = {}
@@ -58,6 +59,10 @@ local function reportNewPlayerSpells(current)
                 spellId = spell.id,
                 activeSpellId = spell.activeSpellId,
                 item = spell.item,
+                isPlayerCast = MagicDetection.isPlayerCastActiveSpell(
+                    spell.caster,
+                    spell
+                ),
                 effects = copyEffects(spell),
             })
         end

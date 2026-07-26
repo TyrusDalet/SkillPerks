@@ -19,6 +19,7 @@ local MOD_NAME = require("scripts.SkillPerks.namespace")
 
 local SECTION = "Settings" .. MOD_NAME
 local LONG_BLADE_HUD_SECTION = SECTION .. "LongBladeHUD"
+local WARD_HUD_SECTION = SECTION .. "WardHUD"
 
 local DEFAULTS = {
     enableLogging = false,
@@ -31,6 +32,12 @@ local LONG_BLADE_HUD_DEFAULTS = {
     longBladeHudEnable = true,
     longBladeHudPosition = util.vector2(0, 0.45),
     longBladeHudUpdateEvery = 1,
+}
+
+local WARD_HUD_DEFAULTS = {
+    wardHudEnable = true,
+    wardHudPosition = util.vector2(1, 0.45),
+    wardHudUpdateEvery = 2,
 }
 
 local function init()
@@ -124,8 +131,49 @@ local function registerLongBladeHudSettings()
     }
 end
 
+--- Registers Ward of Delay's HUD controls when Core 3 is installed.
+--- Keeping registration in the Restoration script prevents Magic-specific
+--- settings from appearing for players who only installed the earlier cores.
+local function registerWardHudSettings()
+    interfaces.Settings.registerGroup {
+        key = WARD_HUD_SECTION,
+        page = MOD_NAME,
+        l10n = MOD_NAME,
+        name = "wardHudSettings",
+        permanentStorage = true,
+        settings = {
+            {
+                key = "wardHudEnable",
+                name = "wardHudEnableName",
+                description = "wardHudEnableDescription",
+                default = WARD_HUD_DEFAULTS.wardHudEnable,
+                renderer = "checkbox",
+            },
+            {
+                key = "wardHudPosition",
+                name = "wardHudPositionName",
+                description = "wardHudPositionDescription",
+                default = WARD_HUD_DEFAULTS.wardHudPosition,
+                renderer = "SkillPerksScreenPosition",
+            },
+            {
+                key = "wardHudUpdateEvery",
+                name = "wardHudUpdateEveryName",
+                description = "wardHudUpdateEveryDescription",
+                default = WARD_HUD_DEFAULTS.wardHudUpdateEvery,
+                renderer = "number",
+                argument = {
+                    min = 1,
+                    integer = true,
+                },
+            },
+        },
+    }
+end
+
 local section = storage.playerSection(SECTION)
 local longBladeHudSection = storage.playerSection(LONG_BLADE_HUD_SECTION)
+local wardHudSection = storage.playerSection(WARD_HUD_SECTION)
 
 local lookup = {
     __index = function(tbl, key)
@@ -133,6 +181,8 @@ local lookup = {
             return init
         elseif key == "registerLongBladeHudSettings" then
             return registerLongBladeHudSettings
+        elseif key == "registerWardHudSettings" then
+            return registerWardHudSettings
         elseif key == "MOD_NAME" then
             return MOD_NAME
         elseif DEFAULTS[key] ~= nil then
@@ -147,6 +197,12 @@ local lookup = {
                 return val
             end
             return LONG_BLADE_HUD_DEFAULTS[key]
+        elseif WARD_HUD_DEFAULTS[key] ~= nil then
+            local val = tbl.wardHudSection:get(key)
+            if val ~= nil then
+                return val
+            end
+            return WARD_HUD_DEFAULTS[key]
         end
 
         local val = tbl.section:get(key)
@@ -160,6 +216,7 @@ local lookup = {
 local container = {
     section = section,
     longBladeHudSection = longBladeHudSection,
+    wardHudSection = wardHudSection,
 }
 setmetatable(container, lookup)
 

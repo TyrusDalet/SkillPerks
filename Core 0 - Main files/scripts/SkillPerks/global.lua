@@ -80,6 +80,15 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
         Relays Inventory Extender's actor-specific UI lifecycle to SkillPerks
         player scripts, and owns NPC Mercantile, disposition, and barter-gold
         writes used by the Mercantile and Speechcraft trees.
+
+    Spell Framework Plus bridge
+        Spellforge applies its generated spell helpers through Spell Framework
+        Plus rather than OpenMW's ordinary player-cast path. SFP exposes an
+        explicit magic-hit event immediately before application and an effect
+        lifecycle event immediately afterwards. The bridge pairs those events
+        and relays an authoritative pre-effect resource snapshot to the player,
+        allowing Magic perks to recognize genuine Spellforge casts without
+        admitting abilities, enchantments, or unrelated scripted effects.
 ]]
 
 local core = require("openmw.core")
@@ -92,9 +101,81 @@ local types = require("openmw.types")
 -- it should suppress vanilla's locked-door response and hand the activation
 -- to Master Locksmith instead.
 local securityMasteryRanks = {}
+local spellforgeCastWindows = {}
 
 local function playerKey(player)
     return player and tostring(player.id) or nil
+end
+
+--- Returns a castable spell record while excluding abilities and enchantments.
+--- SFP accepts several source record types, so this check remains necessary
+--- even after Spellforge has identified the launch in its user data.
+local function castableSpellRecord(spellId)
+    local spell = spellId and core.magic.spells.records[spellId] or nil
+    if not spell then
+        return nil
+    end
+    if spell.type ~= core.magic.SPELL_TYPE.Spell
+            and spell.type ~= core.magic.SPELL_TYPE.Power then
+        return nil
+    end
+    return spell
+end
+
+--- Captures player resources before SFP applies a self-targeted Spellforge
+--- cast. SFP fires MagExp_OnMagicHit before activeSpells:add, which makes this
+--- the reliable point at which to distinguish healing from true overflow.
+local function relaySpellforgeMagicHit(data)
+    data = data or {}
+    local actor = data.actor or data.target
+    local userData = data.userData
+    if type(userData) ~= "table" or userData.spellforge ~= true
+            or not actor or not actor:isValid()
+            or not types.Player.objectIsInstance(actor)
+            or data.attacker ~= actor
+            or not castableSpellRecord(data.spellId) then
+        return
+    end
+
+    local health = types.Actor.stats.dynamic.health(actor)
+    local fatigue = types.Actor.stats.dynamic.fatigue(actor)
+    local key = playerKey(actor) .. "\0" .. tostring(data.spellId)
+    spellforgeCastWindows[key] = core.getSimulationTime() + 1
+    actor:sendEvent("SPerks_SpellforgeMagicHit", {
+        spellId = data.spellId,
+        healthMissing = math.max(0, health.base + health.modifier - health.current),
+        fatigueMissing = math.max(0, fatigue.base + fatigue.modifier - fatigue.current),
+    })
+end
+
+--- Relays SFP's authoritative application metadata only when it follows a
+--- Spellforge launch captured above. This pairing avoids treating arbitrary
+--- SFP-applied scripted spells as deliberate player casts.
+local function relaySpellforgeEffectApplied(data)
+    data = data or {}
+    local actor = data.actor
+    local effect = data.effect or {}
+    if not actor or not actor:isValid()
+            or not types.Player.objectIsInstance(actor)
+            or effect.caster ~= actor
+            or not castableSpellRecord(effect.spellId) then
+        return
+    end
+
+    local key = playerKey(actor) .. "\0" .. tostring(effect.spellId)
+    local expires = spellforgeCastWindows[key]
+    if not expires or expires < core.getSimulationTime() then
+        spellforgeCastWindows[key] = nil
+        return
+    end
+
+    actor:sendEvent("SPerks_SpellforgeEffectApplied", {
+        spellId = effect.spellId,
+        effectId = effect.id,
+        magnitude = effect.magnitude,
+        duration = effect.duration,
+        index = effect.index,
+    })
 end
 
 --- Records whether a player currently owns Master Locksmith.
@@ -462,6 +543,8 @@ return {
         SPerks_ModifyNpcDisposition = modifyNpcDisposition,
         SPerks_ModifyNpcBarterGold = modifyNpcBarterGold,
         IE_UIModeChanged = relayUiModeChanged,
+        MagExp_OnMagicHit = relaySpellforgeMagicHit,
+        MagExp_OnEffectApplied = relaySpellforgeEffectApplied,
 
         -- Compatibility aliases for early Block drafts that shipped with a
         -- temporary per-skill global script.
