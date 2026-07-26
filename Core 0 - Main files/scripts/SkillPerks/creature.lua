@@ -166,6 +166,5 @@ return {
     eventHandlers = magicHandlers,
     engineHandlers = {
         onUpdate = onUpdate,
-        onDeath = MagicTarget.onDeath,
     },
 }

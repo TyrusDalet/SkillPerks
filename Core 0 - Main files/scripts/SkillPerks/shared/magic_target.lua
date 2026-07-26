@@ -95,6 +95,19 @@ local function updateMindThefts(current)
 end
 
 function MagicTarget.onUpdate(dt)
+    -- Only actors carrying a death-triggered perk mark need a death check.
+    -- Expired marks are discarded here, while a valid mark is consumed by
+    -- onDeath after it reports the relevant reward to the player.
+    local now = core.getSimulationTime()
+    if tether and now > (tether.expiresAt or 0) then tether = nil end
+    if destructionDrain and now > (destructionDrain.expiresAt or 0) then
+        destructionDrain = nil
+    end
+    if (tether or destructionDrain) and types.Actor.isDead(pself) then
+        MagicTarget.onDeath()
+        return
+    end
+
     pollTimer = pollTimer - dt
     if pollTimer > 0 then return end
     pollTimer = 0.1
@@ -199,21 +212,30 @@ local function setTether(data)
 end
 
 function MagicTarget.onDeath()
-    if tether and tether.burst and tether.caster and tether.caster:isValid()
-            and core.getSimulationTime() <= (tether.expiresAt or 0) then
-        tether.caster:sendEvent("SPerks_MysticismSoulTetherBurst", {
-            amount = math.ceil((tether.soulValue or 0) * 0.20),
+    local resolvedTether = tether
+    local resolvedDrain = destructionDrain
+    tether = nil
+    destructionDrain = nil
+
+    if resolvedTether and resolvedTether.burst
+            and resolvedTether.caster and resolvedTether.caster:isValid()
+            and core.getSimulationTime() <= (resolvedTether.expiresAt or 0) then
+        resolvedTether.caster:sendEvent("SPerks_MysticismSoulTetherBurst", {
+            amount = math.ceil((resolvedTether.soulValue or 0) * 0.20),
         })
     end
-    if destructionDrain and destructionDrain.caster
-            and destructionDrain.caster:isValid()
-            and core.getSimulationTime() <= (destructionDrain.expiresAt or 0) then
-        local duration = math.max(1, destructionDrain.duration or 1)
-        local remaining = math.max(0, destructionDrain.expiresAt - core.getSimulationTime())
-        destructionDrain.caster:sendEvent("SPerks_DestructionDrainKillRefund", {
-            amount = (destructionDrain.cost or 0)
+    if resolvedDrain and resolvedDrain.caster
+            and resolvedDrain.caster:isValid()
+            and core.getSimulationTime() <= (resolvedDrain.expiresAt or 0) then
+        local duration = math.max(1, resolvedDrain.duration or 1)
+        local remaining = math.max(
+            0,
+            resolvedDrain.expiresAt - core.getSimulationTime()
+        )
+        resolvedDrain.caster:sendEvent("SPerks_DestructionDrainKillRefund", {
+            amount = (resolvedDrain.cost or 0)
                 * math.min(1, remaining / duration)
-                * (destructionDrain.refundRatio or 0),
+                * (resolvedDrain.refundRatio or 0),
         })
     end
 end
