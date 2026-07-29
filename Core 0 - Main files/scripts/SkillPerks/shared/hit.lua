@@ -70,6 +70,67 @@ function Hit.sameObject(left, right)
     return Hit.isPlayerObject(left) and Hit.isPlayerObject(right)
 end
 
+--- Checks whether the actor hosting the current local script has a Combat AI
+--- package aimed at the player. This must run target-side because each local
+--- script's AI interface describes its own actor, not an arbitrary GameObject.
+--- A nil return means the current OpenMW environment did not expose the check.
+--- @param aiInterface table|nil Local `interfaces.AI`.
+--- @param player GameObject|nil Player actor.
+--- @return boolean|nil unaware
+function Hit.isUnawareOfPlayer(aiInterface, player)
+    if not player or not aiInterface or type(aiInterface.forEachPackage) ~= "function" then
+        return nil, "AI package inspection unavailable"
+    end
+
+    local aware = false
+    local awarenessReason = nil
+    local ok = pcall(aiInterface.forEachPackage, function(package)
+        if aware or package == nil then
+            return
+        end
+        local packageOk, packageType = pcall(function() return package.type end)
+        if not packageOk or tostring(packageType):lower() ~= "combat" then
+            return
+        end
+
+        local targetOk, target = pcall(function()
+            return package.target or package.actor
+        end)
+        if not targetOk then
+            aware = true
+            awarenessReason = "Combat package target could not be read"
+            return
+        end
+        if target == nil then
+            -- A Combat package without an inspectable target is treated
+            -- conservatively as awareness rather than granting sneak damage.
+            aware = true
+            awarenessReason = "Combat package has no inspectable target"
+            return
+        end
+        if Hit.sameObject(target, player) then
+            aware = true
+            awarenessReason = "Combat package targets player"
+            return
+        end
+
+        if type(target) == "string" then
+            local playerId = objectField(player, "id")
+            local playerRecordId = objectField(player, "recordId")
+            aware = target == tostring(playerId)
+                or target:lower() == tostring(playerRecordId or ""):lower()
+                or target:lower() == "player"
+            if aware then
+                awarenessReason = "Combat package string target matches player"
+            end
+        end
+    end)
+    if not ok then
+        return nil, "AI package inspection failed"
+    end
+    return not aware, awarenessReason or "no Combat package targets player"
+end
+
 --- Returns the actor struck by an attack payload.
 --- @param attack table|nil OpenMW or Core 0 hit payload.
 --- @return GameObject|nil target

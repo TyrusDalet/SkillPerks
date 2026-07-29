@@ -339,6 +339,8 @@ interfaces.Activation.addHandlerForType(types.Creature, onMagicActorActivated)
 ---     stackable = boolean|nil,
 ---     quiet = boolean|nil,
 ---   }|nil,
+---   skipIfEffectActive = string|nil (do not apply while this effect has
+---     positive magnitude on the target),
 --- }
 local function reportSpellApplication(data, result)
     local recipient = data.resultTarget
@@ -369,6 +371,28 @@ local function createAndApplySpell(data)
             error = "no effects supplied",
         })
         return
+    end
+
+    -- Some proc effects should neither stack nor refresh. Callers opt into
+    -- this last-moment guard because the target can change after a player-local
+    -- eligibility check but before the queued global event is handled.
+    if data.skipIfEffectActive ~= nil then
+        local effectOk, activeEffect = pcall(function()
+            return types.Actor.activeEffects(data.target):getEffect(data.skipIfEffectActive)
+        end)
+        if effectOk and activeEffect ~= nil and (tonumber(activeEffect.magnitude) or 0) > 0 then
+            reportSpellApplication(data, {
+                requestId = data.requestId,
+                target = data.target,
+                targetId = data.target.id,
+                effectId = data.skipIfEffectActive,
+                success = false,
+                active = true,
+                skipped = true,
+                stage = "effect-already-active",
+            })
+            return
+        end
     end
 
     local draftEffects = {}

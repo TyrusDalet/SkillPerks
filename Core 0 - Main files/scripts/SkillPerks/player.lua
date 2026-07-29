@@ -49,9 +49,6 @@ local HIT_TRACE_SKILLS = {
     "spear",
 }
 
-local BRIDGE_DUPLICATE_WINDOW = 0.20
-local lastReceivedBridgeHit = nil
-
 --- Returns a numeric damage field, treating absent secondary resources as 0.
 local function damageValue(attack, resource)
     return attack and attack.damage and tonumber(attack.damage[resource]) or 0
@@ -108,50 +105,33 @@ local function publishBridgeTrace(stage, trace)
     self:sendEvent("SPerks_HitBridgeDiagnostic", trace)
 end
 
---- Suppresses the same native hit when both Framework's built-in unarmed
---- bridge and Core 0's compatibility observer deliver it to the player.
---- @param attack table Normalized player-hit payload.
---- @return boolean duplicate
-local function duplicateBridgeHit(attack)
-    local now = core.getSimulationTime()
-    local target = SharedHit.target(attack)
-    local damage = attack.damage or {}
-    local previous = lastReceivedBridgeHit
-    local duplicate = previous ~= nil
-        and now - previous.time <= BRIDGE_DUPLICATE_WINDOW
-        and SharedHit.sameObject(previous.target, target)
-        and previous.successful == attack.successful
-        and previous.health == (tonumber(damage.health) or 0)
-        and previous.fatigue == (tonumber(damage.fatigue) or 0)
-        and previous.strength == tonumber(attack.strength)
-        and previous.attackType == attack.type
-
-    if not duplicate then
-        lastReceivedBridgeHit = {
-            time = now,
-            target = target,
-            successful = attack.successful,
-            health = tonumber(damage.health) or 0,
-            fatigue = tonumber(damage.fatigue) or 0,
-            strength = tonumber(attack.strength),
-            attackType = attack.type,
-        }
-    end
-    return duplicate
-end
-
---- Returns the perk ids that contributed to one resolved resource channel.
---- Keeping this metadata small makes the target acknowledgement useful without
---- forwarding the complete OpenMW attack payload through two more event hops.
+--- Summarizes every raw perk addition made before the Framework's arithmetic
+--- calculation handlers resolve the final hit total.
+--- @param attack table Resolved shared hit payload.
+--- @param resource string Dynamic resource channel.
+--- @return table ids Contributor effect ids.
+--- @return table details Primitive source/amount records.
+--- @return number rawTotal Sum of raw additions before calculation modifiers.
 local function resourceContributors(attack, resource)
-    local out = {}
+    local ids = {}
+    local details = {}
+    local rawTotal = 0
     for _, contribution in ipairs(attack.perkFrameworkDamageContributors or {}) do
         local metadata = contribution.metadata or {}
-        if contribution.resource == resource and metadata.sourceEffect ~= nil then
-            out[#out + 1] = metadata.sourceEffect
+        if contribution.resource == resource then
+            local amount = tonumber(contribution.amount) or 0
+            rawTotal = rawTotal + amount
+            if metadata.sourceEffect ~= nil then
+                ids[#ids + 1] = metadata.sourceEffect
+            end
+            details[#details + 1] = {
+                sourceEffect = metadata.sourceEffect,
+                context = metadata.context,
+                amount = amount,
+            }
         end
     end
-    return out
+    return ids, details, rawTotal
 end
 
 --- Applies only the arithmetic difference added by Framework hit handlers.
@@ -166,11 +146,16 @@ local function applyResolvedDifference(target, attack, originalDamage)
 
     local framework = interfaces.ErnPerkFramework
     for _, resource in ipairs({ "health", "fatigue", "magicka" }) do
-        local difference = damageValue(attack, resource) - (originalDamage[resource] or 0)
+        local baseDamage = tonumber(originalDamage[resource]) or 0
+        local requestedTotal = damageValue(attack, resource)
+        local difference = requestedTotal - baseDamage
         applied[resource] = difference
         if difference > 0 then
             resourceRequestSerial = resourceRequestSerial + 1
-            local contributors = resourceContributors(attack, resource)
+            local contributors, contributionDetails, rawContributionTotal =
+                resourceContributors(attack, resource)
+            local preHit = attack.perkFrameworkPreHitResources
+                and attack.perkFrameworkPreHitResources[resource]
             core.sendGlobalEvent(RESOURCE_DELTA_EVENT, {
                 actor = target,
                 resource = resource,
@@ -186,6 +171,13 @@ local function applyResolvedDifference(target, attack, originalDamage)
                 },
                 metadata = {
                     contributors = contributors,
+                    contributionDetails = contributionDetails,
+                    rawContributionTotal = rawContributionTotal,
+                    calculationAdjustment =
+                        requestedTotal - baseDamage - rawContributionTotal,
+                    baseDamage = baseDamage,
+                    requestedTotal = requestedTotal,
+                    preHitCurrent = preHit and tonumber(preHit.current) or nil,
                 },
                 resultTarget = self,
                 resultEvent = RESOURCE_RESULT_EVENT,
@@ -207,23 +199,7 @@ local function onPlayerHitActor(attack)
     end
 
     local trace = attack.skillPerksBridgeTrace or {}
-    if attack.perkFrameworkTargetBridge then
-        trace = SharedHit.tracePayload(
-            attack,
-            self,
-            SharedHit.target(attack),
-            "framework",
-            "outgoing"
-        )
-        trace.ownershipSource = attack.perkFrameworkTargetBridge
-        trace.reason = "Framework target-local Combat.onHit bridge"
-    end
     publishBridgeTrace("player-received", trace)
-
-    if duplicateBridgeHit(attack) then
-        logBridgeTrace("framework-dispatched", trace, "processed=false bridge-duplicate=true")
-        return
-    end
 
     local framework = interfaces.ErnPerkFramework
     if not framework or type(framework.dispatchOnHit) ~= "function" then
@@ -265,26 +241,8 @@ local function onHitBridgeTrace(trace)
     publishBridgeTrace("target-rejected", trace)
 end
 
---- Retains an engine payload that reached the Framework while the player was
---- unarmed but did not qualify for the authoritative H2H bridge. It is
---- diagnostic only and never activates a perk.
-local function onRawUnarmedCandidate(attack)
-    local trace = SharedHit.tracePayload(
-        attack,
-        self,
-        SharedHit.target(attack),
-        "framework-raw-candidate",
-        "unknown"
-    )
-    trace.reason = "Combat.onHit reached Framework but did not qualify for player H2H bridge"
-    trace.bridgeRevision = attack and attack.perkFrameworkBridgeRevision
-    publishBridgeTrace("framework-raw-candidate", trace)
-end
-
 return {
     eventHandlers = {
-        ErnPerkFramework_PlayerUnarmedHit = onPlayerHitActor,
-        ErnPerkFramework_RawUnarmedCandidate = onRawUnarmedCandidate,
         SPerks_PlayerHitActor = onPlayerHitActor,
         SPerks_HitBridgeTrace = onHitBridgeTrace,
     },

@@ -64,6 +64,8 @@ end
 local function forwardPlayerHit(attack, context)
     local player = getPlayer()
     local ownershipSource = playerHitSource(attack, player)
+    local targetUnaware, targetAwarenessReason =
+        SharedHit.isUnawareOfPlayer(interfaces.AI, player)
     local trace = SharedHit.tracePayload(
         attack,
         player,
@@ -93,6 +95,8 @@ local function forwardPlayerHit(attack, context)
         sourceType = attack.sourceType,
         critical = attack.critical,
         isCritical = attack.isCritical,
+        skillPerksTargetUnaware = targetUnaware,
+        skillPerksTargetAwarenessReason = targetAwarenessReason,
         perkFrameworkPreHitResources = attack.perkFrameworkPreHitResources,
         skillPerksBridgeTrace = trace,
     })
