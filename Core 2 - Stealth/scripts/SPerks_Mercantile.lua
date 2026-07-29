@@ -29,10 +29,12 @@ local bribePending = false
 local lastGold = nil
 local lastDisposition = nil
 local lastAdjustedOffer = nil
+local updateTimer = 0
 
 local A_DEBUFF = { [1] = -5, [2] = -10, [3] = -15, [4] = -20 }
 local B_DEBUFF = { [1] = -5, [2] = -10 }
 local C_RATE = { [1] = 0.05, [2] = 0.10 }
+local UPDATE_INTERVAL = 0.2
 
 local function aRank() return Common.rank(ids, "A") end
 local function bRank() return Common.rank(ids, "B") end
@@ -230,7 +232,15 @@ local function clearMercantile()
     closeMerchant()
 end
 
-local function onUpdate()
+-- Polls the active merchant session often enough to follow UI changes without
+-- querying inventory, disposition, and Inventory Extender every rendered frame.
+local function onUpdate(dt)
+    updateTimer = updateTimer + dt
+    if updateTimer < UPDATE_INTERVAL then
+        return
+    end
+    updateTimer = updateTimer % UPDATE_INTERVAL
+
     refreshMerchantModifiers()
     updateMarketKnowledge()
     updateBribeLeverage()

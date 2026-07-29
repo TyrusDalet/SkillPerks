@@ -24,11 +24,11 @@ local ids = Common.ids("handtohand")
 
 local defenseTracker = StatTracker.newActiveEffectTracker(self)
 
-local A_DIVISOR = { [1] = 10, [2] = 7, [3] = 5, [4] = 4 }
+local A_DIVISOR = { [1] = 10, [2] = 7, [3] = 5, [4] = 5 }
 local B_RESIST_CAP = { [1] = 20, [2] = 30 }
 local C_CHANCE = { [1] = 0.10, [2] = 0.20 }
-local D_CHANCE = { [1] = 0.25, [2] = 0.50 }
-local D_DURATION = { [1] = 3, [2] = 5 }
+local D_CHANCE = { [1] = 0.10, [2] = 0.25 }
+local D_DURATION = { [1] = 1, [2] = 3 }
 
 local appliedDefense = { resist = 0, sanctuary = 0 }
 local lastBridgeDebug = nil
@@ -41,6 +41,20 @@ local function aRank() return Common.rank(ids, "A") end
 local function bRank() return Common.rank(ids, "B") end
 local function cRank() return Common.rank(ids, "C") end
 local function dRank() return Common.rank(ids, "D") end
+
+--- Returns whether any currently active effect is already paralysing the actor.
+--- Knockout never refreshes or overlaps paralysis, regardless of its source.
+--- @param actor GameObject|nil Actor to inspect.
+--- @return boolean paralyzed
+local function isParalyzed(actor)
+    if not actor or not actor:isValid() then
+        return false
+    end
+    local ok, effect = pcall(function()
+        return types.Actor.activeEffects(actor):getEffect("paralyze")
+    end)
+    return ok and effect ~= nil and (tonumber(effect.magnitude) or 0) > 0
+end
 
 --- Treats a bridged hit as successful when OpenMW reports either a successful
 --- roll or actual resource damage. Some target-local payloads preserve damage
@@ -100,7 +114,8 @@ local function applyIronFists(attack, target)
     if rank == 0 or not target or not target:isValid() then
         return { fatigue = 0, health = 0, fatigueAdded = false, healthAdded = false }
     end
-    local amount = Common.skill(self, SKILL_ID) / A_DIVISOR[rank]
+    local skill = Common.skill(self, SKILL_ID)
+    local amount = skill / A_DIVISOR[rank]
     local fatigueAdded = interfaces.ErnPerkFramework.addHitDamage(attack, "fatigue", amount, {
         source = self,
         sourceEffect = ids["A" .. tostring(rank)],
@@ -110,8 +125,8 @@ local function applyIronFists(attack, target)
     local healthAmount = 0
     local healthAdded = false
     if rank >= 4 and fatigueRatio <= 0.25 then
-        healthAmount = amount
-        healthAdded = interfaces.ErnPerkFramework.addHitDamage(attack, "health", amount, {
+        healthAmount = math.floor(skill / 10)
+        healthAdded = interfaces.ErnPerkFramework.addHitDamage(attack, "health", healthAmount, {
             source = self,
             sourceEffect = ids.A4,
             context = "handtohand.lowFatigueHealth",
@@ -188,15 +203,21 @@ end
 local function tryKnockout(attack, target)
     local rank = dRank()
     local fatigueRatio, usedSnapshot = preHitRatio(attack, target, "fatigue")
+    local alreadyParalyzed = isParalyzed(target)
     lastKnockoutDebug = {
         rank = rank,
         target = target and target.id or nil,
         fatigueRatio = fatigueRatio,
         snapshot = usedSnapshot,
+        alreadyParalyzed = alreadyParalyzed,
         eligible = false,
         reason = rank == 0 and "D chain inactive" or "target above 15% fatigue",
     }
     if rank == 0 or not target or not target:isValid() or fatigueRatio > 0.15 then
+        return
+    end
+    if alreadyParalyzed then
+        lastKnockoutDebug.reason = "target is already paralysed"
         return
     end
     local roll = math.random()
@@ -220,17 +241,19 @@ local function tryKnockout(attack, target)
         caster = self,
         spellName = "SkillPerks Knockout",
         effects = { { id = "paralyze", magnitudeMin = 1, duration = D_DURATION[rank] } },
-        -- Knockout is a martial perk proc, not a hostile spell cast. Once its
-        -- own chance succeeds, magical defenses must not roll a second veto.
+        -- Knockout's perk chance is the first gate, followed by OpenMW's
+        -- ordinary Willpower and Resist Paralysis resolution. As a martial
+        -- strike, it cannot be absorbed as a spell or reflected at the player.
         activeSpellOptions = {
             ignoreReflect = true,
-            ignoreResistances = true,
+            ignoreResistances = false,
             ignoreSpellAbsorption = true,
             quiet = true,
         },
         resultTarget = self,
         resultEvent = "SPerks_H2HKnockoutApplied",
         requestId = requestId,
+        skipIfEffectActive = "paralyze",
     })
 end
 
@@ -373,9 +396,16 @@ local function onKnockoutApplied(data)
     lastKnockoutDebug.spellId = data.spellId
     lastKnockoutDebug.stage = data.stage
     lastKnockoutDebug.error = data.error
-    lastKnockoutDebug.reason = data.success == true
-        and "Paralyze applied"
-        or ("Paralyze failed at " .. tostring(data.stage))
+    if data.skipped == true and data.stage == "effect-already-active" then
+        lastKnockoutDebug.alreadyParalyzed = true
+        lastKnockoutDebug.reason = "target became paralysed before application"
+    elseif data.stage == "verify-active" and data.active ~= true then
+        lastKnockoutDebug.reason = "Paralyze resisted"
+    else
+        lastKnockoutDebug.reason = data.success == true
+            and "Paralyze applied"
+            or ("Paralyze failed at " .. tostring(data.stage))
+    end
 end
 
 -- Confirms the unarmed equipment gate and exposes both resources affected by hits.
@@ -480,9 +510,10 @@ local onConsoleCommand = SkillDebug.makeHandler({
                 disarm.reason
             ) or "Disarm: no accepted unarmed hit.",
             knockout and string.format(
-                "Knockout: preFatigue=%s snapshot=%s eligible=%s chance=%s roll=%s proc=%s duration=%s applied=%s active=%s stage=%s result=%s error=%s",
+                "Knockout: preFatigue=%s snapshot=%s alreadyParalysed=%s eligible=%s chance=%s roll=%s proc=%s duration=%s applied=%s active=%s stage=%s result=%s error=%s",
                 SkillDebug.number(knockout.fatigueRatio),
                 tostring(knockout.snapshot),
+                tostring(knockout.alreadyParalyzed == true),
                 tostring(knockout.eligible),
                 SkillDebug.value(knockout.chance),
                 SkillDebug.value(knockout.roll),
@@ -502,13 +533,13 @@ Common.registerStealthPerks(SKILL_ID, "Hand-to-Hand", ids, {
     A1 = { localizedName = "Iron Fists", localizedFlavour = "Your hands stop being empty. Every strike lands with the weight of breath stolen and balance ruined.", localizedDescription = "Unarmed hits deal bonus fatigue damage equal to Hand-to-Hand / 10.", onRemove = clearHandToHand },
     A2 = { localizedName = "Body Breaker", localizedFlavour = "You strike the places armor forgets to guard.", localizedDescription = "Iron Fists improves to Hand-to-Hand / 7 fatigue damage.", onRemove = clearHandToHand },
     A3 = { localizedName = "Breath Thief", localizedFlavour = "Every blow taxes the lungs until standing becomes the enemy's hardest decision.", localizedDescription = "Iron Fists improves to Hand-to-Hand / 5 fatigue damage.", onRemove = clearHandToHand },
-    A4 = { localizedName = "Empty-Hand Judgment", localizedFlavour = "When their strength is gone, your hands find the line between mercy and silence.", localizedDescription = "Iron Fists improves to Hand-to-Hand / 4. Targets below 25% fatigue also take matching health damage.", onRemove = clearHandToHand },
+    A4 = { localizedName = "Empty-Hand Judgment", localizedFlavour = "When their strength is gone, your hands find the line between mercy and silence.", localizedDescription = "Iron Fists remains at Hand-to-Hand / 5. Targets below 25% fatigue also take Health damage equal to Hand-to-Hand / 10, rounded down.", onRemove = clearHandToHand },
     B1 = { localizedName = "Iron Skin", localizedFlavour = "Unarmed does not mean unguarded. You meet steel with bone, timing, and refusal.", localizedDescription = "While unarmed, gain Resist Normal Weapons equal to Hand-to-Hand / 5, capped at 20%.", onRemove = clearHandToHand },
     B2 = { localizedName = "Bare-Knuckle Ward", localizedFlavour = "You move inside the weapon's reach and make its advantage smaller.", localizedDescription = "Iron Skin's cap rises to 30%. While unarmed, also gain Sanctuary equal to Hand-to-Hand / 10, capped at 10%.", onRemove = clearHandToHand },
     C1 = { localizedName = "Disarming Blow", localizedFlavour = "A wrist, a knuckle, a bad angle. Weapons fail long before their owners understand why.", localizedDescription = "Unarmed hits against armed opponents have a 10% chance to damage their weapon condition by Hand-to-Hand / 3.", onRemove = clearHandToHand },
     C2 = { localizedName = "Breaker Grip", localizedFlavour = "Once a weapon starts to fail, every strike knows exactly where to continue.", localizedDescription = "Disarming Blow chance rises to 20%, doubled against weapons below 25% condition.", onRemove = clearHandToHand },
-    D1 = { localizedName = "Knockout Blow", localizedFlavour = "You wait for fatigue to hollow them out, then place one clean answer where their body cannot argue.", localizedDescription = "Unarmed hits against targets below 15% fatigue have a 25% chance to paralyze for 3 seconds.", onRemove = clearHandToHand },
-    D2 = { localizedName = "Lights Out", localizedFlavour = "The fight ends in a blink, and the floor explains the rest.", localizedDescription = "Knockout Blow chance rises to 50% and duration to 5 seconds.", onRemove = clearHandToHand },
+    D1 = { localizedName = "Knockout Blow", localizedFlavour = "You wait for fatigue to hollow them out, then place one clean answer where their body cannot argue.", localizedDescription = "Unarmed hits against non-paralysed targets below 15% fatigue have a 10% chance to attempt a 1-second paralysis. Natural paralysis resistance applies.", onRemove = clearHandToHand },
+    D2 = { localizedName = "Lights Out", localizedFlavour = "The fight ends in a blink, and the floor explains the rest.", localizedDescription = "Knockout Blow chance rises to 25% and duration to 3 seconds.", onRemove = clearHandToHand },
 })
 
 return {

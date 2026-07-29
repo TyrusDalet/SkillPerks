@@ -141,7 +141,13 @@ end
 --- @param attack table Hit table.
 --- @return boolean unaware
 function Common.isUnawareHit(attack)
-    return attack and (attack.critical == true or attack.isCritical == true)
+    if not attack then
+        return false
+    end
+    if attack.critical == true or attack.isCritical == true then
+        return true
+    end
+    return attack.skillPerksTargetUnaware == true
 end
 
 --- Returns true when a weapon object is a bow, crossbow, or thrown weapon.

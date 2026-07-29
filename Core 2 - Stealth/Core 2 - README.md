@@ -48,8 +48,9 @@ Load those dependencies before `Core 2 SkillPerks.omwscripts`.
   Hand-to-Hand / 10.
 - **A2 - Body Breaker:** Damage improves to Hand-to-Hand / 7.
 - **A3 - Breath Thief:** Damage improves to Hand-to-Hand / 5.
-- **A4 - Empty-Hand Judgment:** Damage improves to Hand-to-Hand / 4; targets
-  below 25% Fatigue take matching Health damage.
+- **A4 - Empty-Hand Judgment:** Fatigue damage remains Hand-to-Hand / 5;
+  targets below 25% Fatigue also take Health damage equal to Hand-to-Hand / 10,
+  rounded down.
 - **B1 - Iron Skin:** While unarmed, gain Resist Normal Weapons equal to
   Hand-to-Hand / 5, capped at 20%.
 - **B2 - Bare-Knuckle Ward:** Resistance cap rises to 30%; also gain Sanctuary
@@ -58,9 +59,10 @@ Load those dependencies before `Core 2 SkillPerks.omwscripts`.
   chance to damage weapon condition by Hand-to-Hand / 3.
 - **C2 - Breaker Grip:** Chance rises to 20% and doubles against weapons below
   25% condition.
-- **D1 - Knockout Blow:** Targets below 15% Fatigue have a 25% chance to be
-  paralysed for three seconds by an unarmed hit.
-- **D2 - Lights Out:** Chance rises to 50% and duration to five seconds.
+- **D1 - Knockout Blow:** Unarmed hits against non-paralysed targets below 15%
+  Fatigue have a 10% chance to attempt a one-second paralysis. The target's
+  Willpower and Resist Paralysis then resolve normally.
+- **D2 - Lights Out:** Chance rises to 25% and duration to three seconds.
 
 ### Light Armor
 
@@ -82,17 +84,21 @@ Load those dependencies before `Core 2 SkillPerks.omwscripts`.
 
 ### Marksman
 
-- **A1 - Steady Aim:** Standing still with a ranged weapon builds +5 Marksman
-  per second after one second, up to +10.
-- **A2 - Held Line:** Maximum bonus rises to +20.
-- **A3 - Dead Calm:** Maximum rises to +30 and buildup begins after 0.5 seconds.
-- **A4 - Certain Shot:** Maximum rises to +40; drawing for three seconds while
-  stationary guarantees the next shot will hit.
+- **A1 - Steady Aim:** While aiming a bow or crossbow, or holding back a thrown
+  weapon, without moving, gain +5 Marksman after one second and another +5
+  every second, up to two stacks (+10).
+- **A2 - Held Line:** Maximum rises to four stacks (+20 Marksman).
+- **A3 - Dead Calm:** Maximum rises to six stacks (+30 Marksman). The first
+  stack and every subsequent stack take 0.5 seconds.
+- **A4 - Certain Shot:** Maximum rises to eight stacks (+40 Marksman); aiming
+  for three seconds while stationary guarantees the next shot will hit.
 - **B1 - Efficient Quiver:** Ranged kills have a 25% chance to recover reported
   fired ammunition.
 - **B2 - Hunter's Return:** Recovery chance rises to 50%.
-- **C1 - Ranged Mastery:** Equipping a bow or crossbow grants +10 Marksman.
-- **C2 - Unbroken Sight:** Bonus rises to +20 Marksman and +5 Agility.
+- **C1 - Crank Discipline:** Crossbows ready 25% faster. When preparing to fire
+  a loaded crossbow, gain +10 Agility and +25 Speed.
+- **C2 - Snaplock:** Crossbows ready 50% faster. When preparing to fire a loaded
+  crossbow, gain +20 Agility and +50 Speed.
 - **D1 - Sniper:** Unaware ranged hits deal 150% damage.
 - **D2 - Last Thing Seen:** Unaware ranged hits deal 200% damage.
 
@@ -217,12 +223,15 @@ the helmet, each pauldron, each gauntlet, and boots are worth 1 each.
 
 - “Unarmed” means no weapon is equipped in the right hand. Shields and other
   left-hand equipment do not disable these perks.
-- Empty-Hand Judgment checks the target's Fatigue before its matching direct
-  Health damage is applied.
+- Empty-Hand Judgment checks the target's Fatigue before applying direct
+  Health damage equal to one-tenth of Hand-to-Hand, rounded down.
 - Disarming Blow and Breaker Grip damage the opponent's currently equipped
   weapon. Breaker Grip's low-condition chance can reach 40%.
-- Knockout Blow and Lights Out apply ordinary Paralysis, so Resist Paralysis
-  and other normal defenses still apply.
+- Knockout Blow and Lights Out first pass their own proc chance, then allow the
+  target's normal Willpower and Resist Paralysis defenses to prevent the
+  effect. As martial procs they bypass spell absorption and reflection. They
+  cannot trigger on an already paralysed target and never stack or refresh an
+  existing paralysis.
 
 ### Light Armor Details
 
@@ -242,17 +251,23 @@ the helmet, each pauldron, each gauntlet, and boots are worth 1 each.
 
 ### Marksman Details
 
-- Steady Aim requires a ranged weapon, no meaningful movement, and the attack
-  control to remain held. After its initial delay it gains +5 Marksman for
-  each full second. Moving, changing away from a ranged weapon, or releasing
-  the draw beyond a brief release window clears the bonus.
+- Steady Aim supports bows, crossbows, and thrown weapons. It requires no
+  meaningful movement and the attack control to remain held. Ranks A1-A2 gain
+  their first +5 Marksman after one
+  second and another stack every second. Dead Calm and Certain Shot reduce
+  both timings to 0.5 seconds. Moving or changing away from a ranged weapon
+  clears the active bonus. Releasing captures the earned stacks for that shot,
+  then clears them when the shot resolves or expires.
 - Certain Shot becomes ready after three stationary seconds. It is consumed by
   the next ranged attack and turns a failed hit into a conservative
-  post-armor hit rather than bypassing armor. A sound cue plays when the shot
-  becomes ready.
+  post-armor hit rather than bypassing armor. A thunder sound plays when the
+  prepared shot is released.
 - Efficient Quiver can return ammunition only when the attack reports which
   arrow or bolt was fired and the target is dead when the delayed kill check
   resolves.
+- Crank Discipline and Snaplock permanently accelerate crossbow preparation
+  while their rank is owned. Their Agility and Speed bonuses apply only while
+  the player holds the attack control to prepare a loaded crossbow to fire.
 - Sniper and Last Thing Seen check awareness when the projectile lands. An
   actor already fighting the player is not unaware.
 
