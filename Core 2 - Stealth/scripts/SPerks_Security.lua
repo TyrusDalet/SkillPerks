@@ -22,6 +22,7 @@ local ui         = require("openmw.ui")
 local Common      = require("scripts.SkillPerks.stealth.common")
 local CombatMath  = require("scripts.SkillPerks.shared.combat_math")
 local StatTracker = require("scripts.SkillPerks.shared.stat_tracker")
+local SkillDebug  = require("scripts.SkillPerks.shared.debug")
 
 local SKILL_ID = "security"
 local ids = Common.ids("security")
@@ -67,6 +68,9 @@ local function registerInventoryExtender()
     end
     registeredIE = true
     interfaces.InventoryExtender.registerRowUseHandler("SkillPerks_SecurityToolUse", function(row)
+        SkillDebug.traceEvent(SKILL_ID, "security tool used", {
+            item = row and SkillDebug.objectId(row.item),
+        })
         if row and row.item then
             rememberTool(row.item)
         end
@@ -134,6 +138,11 @@ local function reconcileToolCondition()
 
     local restore = 0
     local succeeded, lockId = currentTargetResult(trackedTool)
+    SkillDebug.traceEvent(SKILL_ID, "tool result observed", {
+        lock = lockId,
+        loss = loss,
+        succeeded = succeeded,
+    })
     if trackedTool.isLockpick then
         if succeeded == false then
             restore = restore + loss * (A_REDUCTION[aRank()] or 0)
@@ -199,6 +208,12 @@ local function attemptBareHandLock(data)
         (security + agility / 5 + luck / 10) * CombatMath.getFatigueTerm(self)
             - math.max(0, data.lockLevel or 0)))
     local success = math.random() * 100 < chance
+    SkillDebug.traceEvent(SKILL_ID, "bare-hand lock attempt", {
+        chance = chance,
+        rank = rank,
+        success = success,
+        target = SkillDebug.objectId(data.target),
+    })
 
     core.sendGlobalEvent("SPerks_ResolveSecurityBareHandAttempt", {
         player = self,
@@ -211,6 +226,9 @@ local function attemptBareHandLock(data)
 end
 
 local function rememberTarget(data)
+    SkillDebug.traceEvent(SKILL_ID, "lock target observed", {
+        target = data and SkillDebug.objectId(data.target),
+    })
     if not data or not data.target or not data.target:isValid() then
         return
     end
@@ -276,6 +294,32 @@ local function onLoad(data)
     updatePatternBonus()
 end
 
+-- Exposes the exact tool, lock, pattern, and rest-limited bare-hand state.
+local onConsoleCommand = SkillDebug.makeHandler({
+    name = "Security",
+    skillId = SKILL_ID,
+    actor = self,
+    ids = ids,
+    commands = { "luasecurity debug", "luasec debug" },
+    snapshot = function()
+        return {
+            string.format(
+                "Targeting: tool=%s lock=%s patternLock=%s",
+                SkillDebug.objectId(trackedTool),
+                SkillDebug.objectId(targetedLock),
+                tostring(patternLockId)
+            ),
+            string.format(
+                "Pattern: stacks=%d bareHandUses=%d InventoryExtender=%s masteryRank=%d",
+                patternStacks,
+                bareHandUses,
+                tostring(registeredIE),
+                reportedMasteryRank
+            ),
+        }
+    end,
+})
+
 Common.registerStealthPerks(SKILL_ID, "Security", ids, {
     A1 = { localizedName = "Deft Hands", localizedFlavour = "A failed pick is not wasted if your fingers remember why it failed.", localizedDescription = "Lockpick condition loss on a failed attempt is reduced by 20%.", onRemove = clearSecurity },
     A2 = { localizedName = "Soft Pressure", localizedFlavour = "You stop forcing the lock and begin listening to it complain.", localizedDescription = "Deft Hands improves to 40% reduced condition loss on failure.", onRemove = clearSecurity },
@@ -295,5 +339,10 @@ return {
         SPerks_SecurityLockTarget = rememberTarget,
         SPerks_SecurityBareHandAttempt = attemptBareHandLock,
     },
-    engineHandlers = { onUpdate = onUpdate, onSave = onSave, onLoad = onLoad },
+    engineHandlers = {
+        onConsoleCommand = onConsoleCommand,
+        onUpdate = onUpdate,
+        onSave = onSave,
+        onLoad = onLoad,
+    },
 }

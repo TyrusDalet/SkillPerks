@@ -17,6 +17,7 @@ License, or (at your option) any later version.
 ]]
 
 local core       = require("openmw.core")
+local ambient    = require("openmw.ambient")
 local interfaces = require("openmw.interfaces")
 local types      = require("openmw.types")
 local self       = require("openmw.self")
@@ -24,11 +25,13 @@ local self       = require("openmw.self")
 local Common     = require("scripts.SkillPerks.stealth.common")
 local CombatMath = require("scripts.SkillPerks.shared.combat_math")
 local StatTracker = require("scripts.SkillPerks.shared.stat_tracker")
+local SkillDebug  = require("scripts.SkillPerks.shared.debug")
 
 local SKILL_ID = "marksman"
 local ids = Common.ids("marksman")
 
-local aimTracker = StatTracker.newActiveEffectTracker(self)
+local aimStats = StatTracker.newStatModTracker(self, "Marksman Steady Aim")
+local aimEffects = StatTracker.newActiveEffectTracker(self)
 local masteryTracker = StatTracker.newStatModTracker(self, "Marksman Ranged Mastery")
 local masteryEffects = StatTracker.newActiveEffectTracker(self)
 
@@ -37,6 +40,7 @@ local stationaryTime = 0
 local readyShot = false
 local releasedAimGrace = 0
 local pendingRecoveries = {}
+local steadyAimBonus = 0
 
 local A_CAP = { [1] = 10, [2] = 20, [3] = 30, [4] = 40 }
 local A_DELAY = { [1] = 1, [2] = 1, [3] = 0.5, [4] = 0.5 }
@@ -53,6 +57,15 @@ local function equippedRanged()
     return Common.isRangedWeapon(Common.weaponFromAttack(nil, self))
 end
 
+--- Keeps Steady Aim's mechanical Marksman modifier, AAM report, and visible
+--- Fortify Marksman entry aligned to the same computed draw bonus.
+--- @param value number Total Marksman bonus currently earned.
+local function setSteadyAimBonus(value)
+    steadyAimBonus = math.max(0, value or 0)
+    aimStats.apply("skills", SKILL_ID, steadyAimBonus)
+    aimEffects.apply("fortifyskill", SKILL_ID, steadyAimBonus)
+end
+
 -- Builds the Steady Aim bonus from time spent stationary with a ranged weapon ready.
 local function updateSteadyAim(dt)
     local moved = (self.position - lastPos):length() > 3
@@ -63,7 +76,7 @@ local function updateSteadyAim(dt)
         stationaryTime = 0
         readyShot = false
         releasedAimGrace = 0
-        aimTracker.apply("fortifyskill", SKILL_ID, 0)
+        setSteadyAimBonus(0)
         return
     end
 
@@ -75,13 +88,17 @@ local function updateSteadyAim(dt)
     else
         stationaryTime = 0
         readyShot = false
-        aimTracker.apply("fortifyskill", SKILL_ID, 0)
+        setSteadyAimBonus(0)
         return
     end
     local effectiveTime = math.max(0, stationaryTime - A_DELAY[rank])
     local value = math.min(A_CAP[rank], math.floor(effectiveTime) * 5)
-    aimTracker.apply("fortifyskill", SKILL_ID, value)
-    readyShot = rank >= 4 and stationaryTime >= 3
+    setSteadyAimBonus(value)
+    local newlyReady = rank >= 4 and stationaryTime >= 3
+    if newlyReady and not readyShot then
+        ambient.playSound("critical attack")
+    end
+    readyShot = newlyReady
 end
 
 -- Applies Ranged Mastery while a bow or crossbow is equipped.
@@ -166,10 +183,16 @@ local function resolveAmmoRecoveries(dt)
     end
 end
 
---- Resolves prepared shots, ammo recovery, and Sniper through one deduplicated
---- direct/bridge path. A prepared miss is reproduced as direct post-armour
+--- Resolves prepared shots, ammo recovery, and Sniper through the shared
+--- Framework hit path. A prepared miss is reproduced as direct post-armour
 --- damage when the target-side bridge cannot mutate the original attack.
 local function handleOutgoingHit(attack, source)
+    SkillDebug.traceEvent(SKILL_ID, "outgoing hit received", {
+        charge = attack and attack.strength,
+        source = source,
+        successful = attack and attack.successful,
+        weapon = attack and SkillDebug.objectId(attack.weapon),
+    })
     local weapon = Common.weaponFromAttack(attack, self)
     if not Common.isRangedWeapon(weapon) then
         return
@@ -214,7 +237,7 @@ local function handleOutgoingHit(attack, source)
         stationaryTime = 0
         readyShot = false
         releasedAimGrace = 0
-        aimTracker.apply("fortifyskill", SKILL_ID, 0)
+        setSteadyAimBonus(0)
     end
 end
 
@@ -223,19 +246,22 @@ local routeOutgoingHit = Common.newOutgoingHitRouter(self, handleOutgoingHit)
 interfaces.ErnPerkFramework.registerOnHitHandler({
     id = ids.A1 .. "_marksman_hit",
     priority = 410,
+    direction = interfaces.ErnPerkFramework.HIT_DIRECTION.Outgoing,
     handler = function(attack)
-        routeOutgoingHit(attack, "direct")
+        routeOutgoingHit(attack, attack.skillPerksHitSource or "framework")
     end,
 })
 
 local function clearMarksman()
-    aimTracker.clearAll()
+    aimStats.clearAll()
+    aimEffects.clearAll()
     masteryTracker.clearAll()
     masteryEffects.clearAll()
     stationaryTime = 0
     readyShot = false
     releasedAimGrace = 0
     pendingRecoveries = {}
+    steadyAimBonus = 0
 end
 
 local function onUpdate(dt)
@@ -246,7 +272,8 @@ end
 
 local function onSave()
     return {
-        aim = aimTracker.snapshot(),
+        aimStats = aimStats.snapshot(),
+        aimEffects = aimEffects.snapshot(),
         mastery = masteryTracker.snapshot(),
         masteryEffects = masteryEffects.snapshot(),
         stationaryTime = stationaryTime,
@@ -255,12 +282,38 @@ end
 
 local function onLoad(data)
     data = data or {}
-    aimTracker.restoreAndReverse(data.aim)
+    aimStats.restoreAndReverse(data.aimStats)
+    aimEffects.restoreAndReverse(data.aimEffects or data.aim)
     masteryTracker.restoreAndReverse(data.mastery)
     masteryEffects.restoreAndReverse(data.masteryEffects)
     stationaryTime = data.stationaryTime or 0
     pendingRecoveries = {}
+    steadyAimBonus = 0
 end
+
+-- Shows whether steady aim is building and whether Certain Shot is armed.
+local onConsoleCommand = SkillDebug.makeHandler({
+    name = "Marksman",
+    skillId = SKILL_ID,
+    actor = self,
+    ids = ids,
+    commands = { "luamarksman debug", "luamark debug" },
+    snapshot = function()
+        local weapon = types.Actor.getEquipment(self, types.Actor.EQUIPMENT_SLOT.CarriedRight)
+        return {
+            string.format(
+                "Aim: weapon=%s ranged=%s stationary=%s bonus=%d readyShot=%s releaseGrace=%s",
+                SkillDebug.objectId(weapon),
+                tostring(Common.isRangedWeapon(weapon)),
+                SkillDebug.number(stationaryTime),
+                steadyAimBonus,
+                tostring(readyShot),
+                SkillDebug.number(releasedAimGrace)
+            ),
+            string.format("Ammunition recoveries pending=%d", #pendingRecoveries),
+        }
+    end,
+})
 
 Common.registerStealthPerks(SKILL_ID, "Marksman", ids, {
     A1 = { localizedName = "Steady Aim", localizedFlavour = "You let the world narrow to breath, string, and distance. The shot waits until your hands become still.", localizedDescription = "Standing still with a ranged weapon builds +5 Marksman per second after 1 second, up to +10.", onRemove = clearMarksman },
@@ -276,12 +329,8 @@ Common.registerStealthPerks(SKILL_ID, "Marksman", ids, {
 })
 
 return {
-    eventHandlers = {
-        SPerks_PlayerHitActor = function(attack)
-            routeOutgoingHit(attack, "bridge")
-        end,
-    },
     engineHandlers = {
+        onConsoleCommand = onConsoleCommand,
         onUpdate = onUpdate,
         onSave = onSave,
         onLoad = onLoad,

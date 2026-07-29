@@ -14,6 +14,7 @@ local types      = require("openmw.types")
 local self       = require("openmw.self")
 
 local Common = require("scripts.SkillPerks.stealth.common")
+local SkillDebug = require("scripts.SkillPerks.shared.debug")
 
 local SKILL_ID = "mercantile"
 local ids = Common.ids("mercantile")
@@ -144,6 +145,11 @@ end
 
 local function onUiModeChanged(data)
     data = data or {}
+    SkillDebug.traceEvent(SKILL_ID, "UI mode changed", {
+        newMode = data.newMode,
+        oldMode = data.oldMode,
+        target = SkillDebug.objectId(data.arg),
+    })
     if data.newMode == nil then
         closeMerchant()
         return
@@ -205,6 +211,10 @@ end
 
 local function onBarterFinalized()
     local rank = bRank()
+    SkillDebug.traceEvent(SKILL_ID, "barter finalized", {
+        merchant = SkillDebug.objectId(currentMerchant),
+        rank = rank,
+    })
     if rank == 0 or not currentMerchant or not currentMerchant:isValid() then
         return
     end
@@ -244,6 +254,33 @@ local function onLoad(data)
     closeMerchant()
 end
 
+-- Reports the active merchant session and every temporary adjustment it owns.
+local onConsoleCommand = SkillDebug.makeHandler({
+    name = "Mercantile",
+    skillId = SKILL_ID,
+    actor = self,
+    ids = ids,
+    commands = { "luamercantile debug", "luamerc debug" },
+    snapshot = function()
+        return {
+            string.format(
+                "Barter: active=%s merchant=%s haggleSucceeded=%s bribePending=%s",
+                tostring(inBarter),
+                SkillDebug.objectId(currentMerchant),
+                tostring(successfulHaggle),
+                tostring(bribePending)
+            ),
+            string.format(
+                "Applied: mercantile=%s disposition=%s gold=%s lastOffer=%s",
+                SkillDebug.number(appliedMercantile),
+                SkillDebug.number(appliedDisposition),
+                SkillDebug.number(appliedGold),
+                SkillDebug.value(lastAdjustedOffer)
+            ),
+        }
+    end,
+})
+
 Common.registerStealthPerks(SKILL_ID, "Mercantile", ids, {
     A1 = { localizedName = "Sharp Eye", localizedFlavour = "You see the scratch under the polish, the old repair beneath the shine, and the seller's hope between them.", localizedDescription = "Merchants you speak with suffer -5 Mercantile for the conversation.", onRemove = clearMercantile },
     A2 = { localizedName = "Weighted Coin", localizedFlavour = "Every price has a weak point. You press until it moves.", localizedDescription = "Sharp Eye's merchant penalty increases to -10 Mercantile.", onRemove = clearMercantile },
@@ -263,6 +300,7 @@ return {
         SPerks_UiModeChanged = onUiModeChanged,
     },
     engineHandlers = {
+        onConsoleCommand = onConsoleCommand,
         onUpdate = onUpdate,
         onSave = onSave,
         onLoad = onLoad,

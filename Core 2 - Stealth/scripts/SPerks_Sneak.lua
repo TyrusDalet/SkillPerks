@@ -32,6 +32,7 @@ local self       = require("openmw.self")
 
 local Common            = require("scripts.SkillPerks.stealth.common")
 local StatTracker       = require("scripts.SkillPerks.shared.stat_tracker")
+local SkillDebug        = require("scripts.SkillPerks.shared.debug")
 
 local SKILL_ID = "sneak"
 local ids = Common.ids("sneak")
@@ -106,6 +107,10 @@ end
 --- cheaper and more precise encounter boundary than polling every nearby AI
 --- package from the player script.
 local function onCombatTargetsChanged(data)
+    SkillDebug.traceEvent(SKILL_ID, "combat targets changed", {
+        actor = data and SkillDebug.objectId(data.actor),
+        targets = data and data.targets and #data.targets or 0,
+    })
     if not data or not data.actor then
         return
     end
@@ -145,6 +150,10 @@ end
 --- Opportunist adds the missing share of the first unaware strike after the
 --- target's normal post-armour damage has resolved.
 local function handleOutgoingHit(attack)
+    SkillDebug.traceEvent(SKILL_ID, "Opportunist check", {
+        successful = attack and attack.successful,
+        unaware = attack and Common.isUnawareHit(attack),
+    })
     local rank = cRank()
     local target = Common.attackTarget(attack)
     if rank == 0 or attack.successful ~= true or not target or not target:isValid()
@@ -169,8 +178,9 @@ local routeOutgoingHit = Common.newOutgoingHitRouter(self, handleOutgoingHit)
 interfaces.ErnPerkFramework.registerOnHitHandler({
     id = ids.C1 .. "_sneak_hit",
     priority = 350,
+    direction = interfaces.ErnPerkFramework.HIT_DIRECTION.Outgoing,
     handler = function(attack)
-        routeOutgoingHit(attack, "direct")
+        routeOutgoingHit(attack, attack.skillPerksHitSource or "framework")
     end,
 })
 
@@ -214,6 +224,31 @@ local function onLoad(data)
     combatTargets = {}
 end
 
+-- Shows sneak transitions, combat awareness, and first-strike target memory.
+local onConsoleCommand = SkillDebug.makeHandler({
+    name = "Sneak",
+    skillId = SKILL_ID,
+    actor = self,
+    ids = ids,
+    commands = { "luasneak debug" },
+    snapshot = function()
+        return {
+            string.format(
+                "Movement: sneaking=%s silentSpeed=%s phantomTimer=%s extended=%s",
+                tostring(lastSneaking),
+                SkillDebug.number(appliedSilentSpeed),
+                SkillDebug.number(phantomTimer),
+                tostring(phantomExtended)
+            ),
+            string.format(
+                "Target memory: struck=%d combatTargets=%d",
+                SkillDebug.count(struckTargets),
+                SkillDebug.count(combatTargets)
+            ),
+        }
+    end,
+})
+
 Common.registerStealthPerks(SKILL_ID, "Sneak", ids, {
     A1 = { localizedName = "Shadow Step", localizedFlavour = "You learn to move where attention is thinnest, letting silence gather around every careful footfall.", localizedDescription = "While sneaking, gain +5 Sneak.", onRemove = clearSneakState },
     A2 = { localizedName = "Soft Footfall", localizedFlavour = "Your steps stop asking the world for permission. Dust settles louder than you do.", localizedDescription = "Shadow Step increases to +10 Sneak.", onRemove = clearSneakState },
@@ -230,11 +265,9 @@ Common.registerStealthPerks(SKILL_ID, "Sneak", ids, {
 return {
     eventHandlers = {
         OMWMusicCombatTargetsChanged = onCombatTargetsChanged,
-        SPerks_PlayerHitActor = function(attack)
-            routeOutgoingHit(attack, "bridge")
-        end,
     },
     engineHandlers = {
+        onConsoleCommand = onConsoleCommand,
         onUpdate = onUpdate,
         onSave = onSave,
         onLoad = onLoad,

@@ -14,6 +14,7 @@ local self = require("openmw.self")
 
 local Common      = require("scripts.SkillPerks.stealth.common")
 local StatTracker = require("scripts.SkillPerks.shared.stat_tracker")
+local SkillDebug  = require("scripts.SkillPerks.shared.debug")
 
 local SKILL_ID = "speechcraft"
 local ids = Common.ids("speechcraft")
@@ -117,6 +118,11 @@ end
 
 local function onUiModeChanged(data)
     data = data or {}
+    SkillDebug.traceEvent(SKILL_ID, "UI mode changed", {
+        newMode = data.newMode,
+        oldMode = data.oldMode,
+        target = SkillDebug.objectId(data.arg),
+    })
     if data.newMode == nil then
         closeConversation()
     elseif data.newMode == "Dialogue" and data.arg then
@@ -147,6 +153,10 @@ end
 -- however, so each non-zero change is treated as one completed attempt. This
 -- lets all post-roll outcomes work without replacing the game's dialogue UI.
 local function processDispositionAttempt(delta)
+    SkillDebug.traceEvent(SKILL_ID, "disposition change observed", {
+        delta = delta,
+        npc = SkillDebug.objectId(currentNpc),
+    })
     local npc = currentNpc
     if not npc or delta == 0 then
         return
@@ -253,6 +263,33 @@ local function onLoad(data)
     setNextAttemptBonus(nextAttemptBonus)
 end
 
+-- Reports the current persuasion chain, daily command uses, and lingering NPCs.
+local onConsoleCommand = SkillDebug.makeHandler({
+    name = "Speechcraft",
+    skillId = SKILL_ID,
+    actor = self,
+    ids = ids,
+    commands = { "luaspeechcraft debug", "luaspeech debug" },
+    snapshot = function()
+        return {
+            string.format(
+                "Conversation: npc=%s disposition=%s nextBonus=%s successes=%d rewarded=%s",
+                SkillDebug.objectId(currentNpc),
+                SkillDebug.value(lastDisposition),
+                SkillDebug.number(nextAttemptBonus),
+                consecutiveSuccesses,
+                tostring(conversationRewarded)
+            ),
+            string.format(
+                "Command: day=%s uses=%d lingeringNPCs=%d",
+                SkillDebug.value(commandDay),
+                commandUses,
+                SkillDebug.count(lingering)
+            ),
+        }
+    end,
+})
+
 Common.registerStealthPerks(SKILL_ID, "Speechcraft", ids, {
     A1 = { localizedName = "Compelling Voice", localizedFlavour = "You learn where a sentence should lean, and people begin leaning with it.", localizedDescription = "A successful persuasion attempt grants +5 Speechcraft to your next attempt with that NPC during the conversation.", onRemove = clearSpeechcraft },
     A2 = { localizedName = "Measured Praise", localizedFlavour = "Admiration becomes a tool, sharpened carefully enough to pass for kindness.", localizedDescription = "Compelling Voice's next-attempt bonus increases to +10 Speechcraft.", onRemove = clearSpeechcraft },
@@ -271,6 +308,7 @@ return {
         SPerks_UiModeChanged = onUiModeChanged,
     },
     engineHandlers = {
+        onConsoleCommand = onConsoleCommand,
         onUpdate = onUpdate,
         onSave = onSave,
         onLoad = onLoad,

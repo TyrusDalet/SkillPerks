@@ -32,6 +32,7 @@ local self       = require("openmw.self")
 local Common      = require("scripts.SkillPerks.stealth.common")
 local ArmorPoints = require("scripts.SkillPerks.shared.armor_points")
 local StatTracker = require("scripts.SkillPerks.shared.stat_tracker")
+local SkillDebug  = require("scripts.SkillPerks.shared.debug")
 
 local SKILL_ID = "lightarmor"
 local ids = Common.ids("lightarmor")
@@ -101,6 +102,7 @@ interfaces.ErnPerkFramework.registerCalculationHandler({
     calculation = CALCULATION.HIT_DAMAGE_HEALTH,
     operation = OPERATION.Modifier,
     priority = 360,
+    direction = interfaces.ErnPerkFramework.HIT_DIRECTION.Incoming,
     handler = function(data)
         if pendingReductionStacks <= 0 or pendingReductionRank <= 0 then
             return nil
@@ -113,6 +115,10 @@ interfaces.ErnPerkFramework.registerCalculationHandler({
 })
 
 local function onHit(attack)
+    SkillDebug.traceEvent(SKILL_ID, "hit received", {
+        healthDamage = attack and attack.damage and attack.damage.health,
+        successful = attack and attack.successful,
+    })
     if not mostlyLight() then
         return
     end
@@ -152,9 +158,8 @@ local function onHit(attack)
     end
 end
 
--- Outgoing hits are delivered by the struck actor in Core 0. Apply B2's
--- post-armour bonus through the direct-health pipeline, then consume the
--- burst exactly once even when both direct and bridged callbacks are seen.
+-- Core 0 delivers outgoing hits through the Framework. Apply B2's post-armour
+-- bonus through the direct-health pipeline, then consume the burst once.
 local routeOutgoingHit = Common.newOutgoingHitRouter(self, function(attack)
     if bRank() < 2 or burstTimer <= 0 or attack.successful ~= true then
         return
@@ -176,7 +181,7 @@ interfaces.ErnPerkFramework.registerOnHitHandler({
     priority = 420,
     handler = function(attack)
         onHit(attack)
-        routeOutgoingHit(attack, "direct")
+        routeOutgoingHit(attack, attack.skillPerksHitSource or "framework")
     end,
 })
 
@@ -232,6 +237,38 @@ local function onLoad(data)
     dLockout = data.dLockout or 0
 end
 
+-- Reports the reactive burst, both dodge-stack tracks, and pending hit reduction.
+local onConsoleCommand = SkillDebug.makeHandler({
+    name = "Light Armor",
+    skillId = SKILL_ID,
+    actor = self,
+    ids = ids,
+    commands = { "lualightarmor debug", "luala debug" },
+    snapshot = function()
+        local points, breakdown = ArmorPoints.getPoints(self)
+        return {
+            string.format(
+                "Armor: points=%s equippedPieces=%d",
+                SkillDebug.number(points),
+                SkillDebug.count(breakdown)
+            ),
+            string.format(
+                "Reactive Step: burst=%s pendingReduction=%d rank=%d",
+                SkillDebug.number(burstTimer),
+                pendingReductionStacks,
+                pendingReductionRank
+            ),
+            string.format(
+                "Dodge: C=%d lockout=%s D=%d lockout=%s",
+                cDodgeStacks,
+                SkillDebug.number(cLockout),
+                dDodgeStacks,
+                SkillDebug.number(dLockout)
+            ),
+        }
+    end,
+})
+
 Common.registerStealthPerks(SKILL_ID, "Light Armor", ids, {
     A1 = { localizedName = "Evasive", localizedFlavour = "Light armor does not ask you to endure the blow. It teaches you to be where the blow is not.", localizedDescription = "While mostly wearing Light Armor, gain Sanctuary +5.", onAdd = updateAStats, onRemove = clearLightArmorState },
     A2 = { localizedName = "Slip the Line", localizedFlavour = "The attack arrives with certainty. You answer with absence.", localizedDescription = "Evasive increases to Sanctuary +10.", onAdd = updateAStats, onRemove = clearLightArmorState },
@@ -246,12 +283,8 @@ Common.registerStealthPerks(SKILL_ID, "Light Armor", ids, {
 })
 
 return {
-    eventHandlers = {
-        SPerks_PlayerHitActor = function(attack)
-            routeOutgoingHit(attack, "bridge")
-        end,
-    },
     engineHandlers = {
+        onConsoleCommand = onConsoleCommand,
         onUpdate = onUpdate,
         onSave = onSave,
         onLoad = onLoad,

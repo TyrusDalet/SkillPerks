@@ -17,6 +17,7 @@ local self       = require("openmw.self")
 
 local Common      = require("scripts.SkillPerks.stealth.common")
 local StatTracker = require("scripts.SkillPerks.shared.stat_tracker")
+local SkillDebug  = require("scripts.SkillPerks.shared.debug")
 
 local SKILL_ID = "acrobatics"
 local ids = Common.ids("acrobatics")
@@ -60,6 +61,10 @@ local function updateMomentumEffects()
 end
 
 local function startJumpEffects()
+    SkillDebug.traceEvent(SKILL_ID, "jump started", {
+        cRank = cRank(),
+        dRank = dRank(),
+    })
     local rankC = cRank()
     if rankC > 0 then
         chameleonTimer = rankC >= 2 and Common.controlActive(self, "sneak") and 2 or 1
@@ -77,6 +82,11 @@ end
 --- Applies Acrobatic Strike through the target bridge, using the resolved base
 --- hit damage so the bonus retains the engine's armour result.
 local function handleOutgoingHit(attack)
+    SkillDebug.traceEvent(SKILL_ID, "outgoing hit received", {
+        aerialWindow = aerialStrikeWindow,
+        onGround = types.Actor.isOnGround(self),
+        successful = attack and attack.successful,
+    })
     local rank = bRank()
     if rank == 0 or attack.successful ~= true then
         return
@@ -108,7 +118,7 @@ interfaces.ErnPerkFramework.registerOnHitHandler({
             recentIncomingDamageTime = core.getSimulationTime()
             return
         end
-        routeOutgoingHit(attack, "direct")
+        routeOutgoingHit(attack, attack.skillPerksHitSource or "framework")
     end,
 })
 
@@ -229,6 +239,34 @@ local function onLoad(data)
     jumpTimer = data.jumpTimer or 0
 end
 
+-- Shows the movement transitions that gate landing, aerial, and jump effects.
+local onConsoleCommand = SkillDebug.makeHandler({
+    name = "Acrobatics",
+    skillId = SKILL_ID,
+    actor = self,
+    ids = ids,
+    commands = { "luaacrobatics debug", "luaacro debug" },
+    snapshot = function()
+        return {
+            string.format(
+                "Movement: grounded=%s jumping=%s highestZ=%s landingBurst=%s aerialWindow=%s",
+                tostring(wasGrounded),
+                tostring(wasJumping),
+                SkillDebug.number(highestZ),
+                SkillDebug.number(landingBurst),
+                SkillDebug.number(aerialStrikeWindow)
+            ),
+            string.format(
+                "Effects: chameleon=%s jumpStacks=%d jumpTimer=%s recentDamage=%s",
+                SkillDebug.number(chameleonTimer),
+                jumpStacks,
+                SkillDebug.number(jumpTimer),
+                SkillDebug.number(recentIncomingDamage)
+            ),
+        }
+    end,
+})
+
 Common.registerStealthPerks(SKILL_ID, "Acrobatics", ids, {
     A1 = { localizedName = "Light Landing", localizedFlavour = "You learn to argue with the ground and lose less each time.", localizedDescription = "Reduces fall damage by 20%.", onRemove = clearAcrobatics },
     A2 = { localizedName = "Soft Impact", localizedFlavour = "Stone still wins, but it stops winning cleanly.", localizedDescription = "Light Landing improves to 40% reduced fall damage.", onRemove = clearAcrobatics },
@@ -243,10 +281,10 @@ Common.registerStealthPerks(SKILL_ID, "Acrobatics", ids, {
 })
 
 return {
-    eventHandlers = {
-        SPerks_PlayerHitActor = function(attack)
-            routeOutgoingHit(attack, "bridge")
-        end,
+    engineHandlers = {
+        onConsoleCommand = onConsoleCommand,
+        onUpdate = onUpdate,
+        onSave = onSave,
+        onLoad = onLoad,
     },
-    engineHandlers = { onUpdate = onUpdate, onSave = onSave, onLoad = onLoad },
 }

@@ -27,12 +27,13 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 ]]
 
 local ns = require("scripts.SkillPerks.namespace")
-local core = require("openmw.core")
 local interfaces = require("openmw.interfaces")
 local types = require("openmw.types")
 
 local ChainRequirements = require("scripts.SkillPerks.shared.chain_requirements")
+local SkillDebug = require("scripts.SkillPerks.shared.debug")
 local StealthConstellations = require("scripts.SkillPerks.constellations.stealth")
+local SharedHit = require("scripts.SkillPerks.shared.hit")
 
 local Common = {}
 
@@ -55,6 +56,16 @@ local RANGED_TYPES = {
     [types.Weapon.TYPE.MarksmanCrossbow] = true,
     [types.Weapon.TYPE.MarksmanThrown] = true,
 }
+
+--- Safely identifies an equipped weapon object. Forwarded hit payloads may
+--- contain a record id or an unavailable object in their `weapon` field;
+--- callers should fall back to the player's current equipment in that case.
+--- @param value any Candidate hit-source value.
+--- @return boolean weapon
+local function isWeaponObject(value)
+    local ok, result = pcall(types.Weapon.objectIsInstance, value)
+    return ok and result == true
+end
 
 --- Builds the standard SkillPerks id table for one skill.
 --- @param skillKey string Lowercase key used inside the id.
@@ -113,7 +124,7 @@ end
 --- @param player GameObject Player actor.
 --- @return boolean result
 function Common.isPlayerAttack(attack, player)
-    return attack and attack.attacker == player
+    return SharedHit.isPlayerAttack(attack, player)
 end
 
 --- Returns true when the attack target is the player.
@@ -137,7 +148,7 @@ end
 --- @param weapon GameObject|nil Weapon instance.
 --- @return boolean result
 function Common.isRangedWeapon(weapon)
-    if not weapon or not types.Weapon.objectIsInstance(weapon) then
+    if not isWeaponObject(weapon) then
         return false
     end
     return RANGED_TYPES[types.Weapon.record(weapon).type] == true
@@ -147,7 +158,7 @@ end
 --- @param weapon GameObject|nil Weapon instance.
 --- @return boolean result
 function Common.isBowOrCrossbow(weapon)
-    if not weapon or not types.Weapon.objectIsInstance(weapon) then
+    if not isWeaponObject(weapon) then
         return false
     end
     local weaponType = types.Weapon.record(weapon).type
@@ -159,8 +170,7 @@ end
 --- @param weapon GameObject|nil Weapon instance.
 --- @return boolean result
 function Common.isShortBlade(weapon)
-    return weapon
-        and types.Weapon.objectIsInstance(weapon)
+    return isWeaponObject(weapon)
         and types.Weapon.record(weapon).type == types.Weapon.TYPE.ShortBladeOneHand
 end
 
@@ -176,11 +186,14 @@ end
 --- @param actor GameObject|nil Fallback actor to inspect.
 --- @return GameObject|nil weapon
 function Common.weaponFromAttack(attack, actor)
-    if attack and attack.weapon then
+    if attack and isWeaponObject(attack.weapon) then
         return attack.weapon
     end
     if actor then
-        return types.Actor.getEquipment(actor, types.Actor.EQUIPMENT_SLOT.CarriedRight)
+        local equipped = types.Actor.getEquipment(actor, types.Actor.EQUIPMENT_SLOT.CarriedRight)
+        if isWeaponObject(equipped) then
+            return equipped
+        end
     end
     return nil
 end
@@ -249,73 +262,45 @@ function Common.healthDamage(attack)
     return math.max(0, value or 0)
 end
 
---- Applies additional health damage from a player perk at the target actor.
---- Target-local Core 0 scripts own the resource write and route it through the
---- Framework's `direct.damage.health` calculation before changing Health.
+--- Contributes additional health damage to the current shared hit resolution.
+--- Core 0 applies the combined difference after every subscribed perk has
+--- contributed, producing one target resource event instead of one per perk.
 --- @param attack table OpenMW combat hit payload.
 --- @param amount number Additional damage to apply.
 --- @param player GameObject Source player.
 --- @param sourceEffect string Perk or effect id used for interop diagnostics.
 --- @param context string Short reason for debug and modifier handlers.
---- @return boolean sent True when a valid target received the event.
+--- @return boolean added True when a positive contribution was recorded.
 function Common.applyBonusHealthDamage(attack, amount, player, sourceEffect, context)
     local target = Common.attackTarget(attack)
     amount = math.max(0, tonumber(amount) or 0)
     if amount <= 0 or not target or not target:isValid() then
         return false
     end
-    target:sendEvent("SPerks_TakeDamage", {
-        amount = amount,
+    return interfaces.ErnPerkFramework.addHitDamage(attack, "health", amount, {
         source = player,
         sourceEffect = sourceEffect,
         context = context,
-        originalAttack = attack,
     })
-    return true
 end
 
---- Creates one outgoing-hit entry point shared by the direct Combat callback
---- and Core 0's target-to-player bridge. Identical payloads arriving once by
---- each route are collapsed, while two genuinely rapid hits arriving through
---- the same route are both retained.
+--- Creates a consistent outgoing-hit entry point for Stealth perks.
+--- Core 0 and ErnPerkFramework now own delivery and duplicate suppression;
+--- this helper only validates player ownership before calling the skill.
 --- @param player GameObject Player actor.
 --- @param handler function Called as handler(attack, source).
---- @return function route Call with `(attack, "direct")` or `(attack, "bridge")`.
+--- @return function route Call with `(attack, source)`.
 function Common.newOutgoingHitRouter(player, handler)
-    local lastSignature = nil
-    local lastSource = nil
-    local lastTime = -9999
-
-    local function signature(attack)
-        local target = Common.attackTarget(attack)
-        local weapon = Common.weaponFromAttack(attack, player)
-        local recordId = nil
-        if weapon and types.Weapon.objectIsInstance(weapon) then
-            recordId = types.Weapon.record(weapon).id
-        end
-        -- Deliberately omit `successful`: a direct handler may promote a
-        -- prepared miss to a hit before the forwarded copy is assembled.
-        return tostring(target)
-            .. "|" .. tostring(recordId)
-            .. "|" .. tostring(attack and attack.strength)
-            .. "|" .. tostring(attack and attack.sourceType)
-    end
-
     return function(attack, source)
         attack = attack or {}
-        source = source or "direct"
+        source = source or "framework"
         if not Common.isPlayerAttack(attack, player) then
             return false
         end
-        local now = core.getSimulationTime()
-        local currentSignature = signature(attack)
-        if currentSignature == lastSignature and source ~= lastSource and now - lastTime < 0.25 then
+        local handled = handler(attack, source)
+        if handled == false then
             return false
         end
-        lastSignature = currentSignature
-        lastSource = source
-        lastTime = now
-        handler(attack, source)
         return true
     end
 end
@@ -343,8 +328,8 @@ function Common.registerStealthPerks(skillId, skillName, ids, entries)
                 localizedFlavour = entry.localizedFlavour,
                 localizedDescription = entry.localizedDescription,
                 requirements = ChainRequirements.forSlot(skillId, ids, slot),
-                onAdd = entry.onAdd or function() end,
-                onRemove = entry.onRemove or function() end,
+                onAdd = SkillDebug.wrapCallback(skillId, slot .. " applied/resynced", entry.onAdd),
+                onRemove = SkillDebug.wrapCallback(skillId, slot .. " removed", entry.onRemove),
             })
         end
     end

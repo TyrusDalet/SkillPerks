@@ -13,8 +13,11 @@ License, or (at your option) any later version.
 local core       = require("openmw.core")
 local interfaces = require("openmw.interfaces")
 local self       = require("openmw.self")
+local types      = require("openmw.types")
+local ui         = require("openmw.ui")
 
 local Common      = require("scripts.SkillPerks.stealth.common")
+local SkillDebug  = require("scripts.SkillPerks.shared.debug")
 local StatTracker = require("scripts.SkillPerks.shared.stat_tracker")
 
 local SKILL_ID = "shortblade"
@@ -28,6 +31,7 @@ local openedTargets = {}
 local vitalTargets = {}
 local vitalTargetKey = nil
 local bleeds = {}
+local lastHitDebug = nil
 
 local A_SPEED = { [1] = 3, [2] = 5, [3] = 5, [4] = 5 }
 local A_CAP = { [1] = 3, [2] = 3, [3] = 5, [4] = 8 }
@@ -41,15 +45,25 @@ local function bRank() return Common.rank(ids, "B") end
 local function cRank() return Common.rank(ids, "C") end
 local function dRank() return Common.rank(ids, "D") end
 
+--- Accepts the normal OpenMW success flag and the target bridge's resolved
+--- positive-damage fallback. Some target-local callbacks omit `successful`
+--- even though the weapon hit has already dealt health damage.
+local function hitWasSuccessful(attack)
+    return attack.successful == true or Common.healthDamage(attack) > 0
+end
+
 local function isShortBladeAttack(attack)
     return Common.isPlayerAttack(attack, self)
-        and attack.successful == true
+        and hitWasSuccessful(attack)
         and Common.isShortBlade(Common.weaponFromAttack(attack, self))
 end
 
 -- Keeps the visible Speed/Agility bonuses aligned to Blade Tempo stacks.
 local function updateTempo()
     local rank = aRank()
+    if rank > 0 then
+        tempoStacks = math.min(tempoStacks, A_CAP[rank])
+    end
     local speed = rank > 0 and tempoStacks * A_SPEED[rank] or 0
     local agility = rank >= 4 and tempoStacks >= A_CAP[rank] and 10 or 0
     tempoStats.apply("attributes", "speed", speed)
@@ -115,9 +129,23 @@ local function updateBleeds(dt)
     end
 end
 
-local routeOutgoingHit = Common.newOutgoingHitRouter(self, function(attack)
+local routeOutgoingHit = Common.newOutgoingHitRouter(self, function(attack, source)
+    local weapon = Common.weaponFromAttack(attack, self)
+    local weaponRecord = weapon and types.Weapon.record(weapon) or nil
+    lastHitDebug = {
+        source = source,
+        successful = attack.successful,
+        healthDamage = Common.healthDamage(attack),
+        weaponId = weaponRecord and weaponRecord.id or nil,
+        weaponType = weaponRecord and weaponRecord.type or nil,
+        shortBlade = Common.isShortBlade(weapon),
+        playerOwned = attack.skillPerksPlayerOwned == true,
+        aRank = aRank(),
+        stacksBefore = tempoStacks,
+    }
     if not isShortBladeAttack(attack) then
-        return
+        lastHitDebug.result = "rejected by Short Blade hit check"
+        return false
     end
     local target = Common.attackTarget(attack)
     local key = Common.targetKey(target)
@@ -145,6 +173,8 @@ local routeOutgoingHit = Common.newOutgoingHitRouter(self, function(attack)
     Common.applyBonusHealthDamage(attack, bonus, self, ids.B1, "shortblade.bonusDamage")
 
     addTempo()
+    lastHitDebug.stacksAfter = tempoStacks
+    lastHitDebug.result = "Tempo applied"
     if vitalRank > 0 and key then
         vital = vital or { stacks = 0, timer = 0 }
         vital.stacks = math.min(C_CAP[vitalRank], vital.stacks + 1)
@@ -152,13 +182,44 @@ local routeOutgoingHit = Common.newOutgoingHitRouter(self, function(attack)
         vitalTargets[key] = vital
     end
     addBleed(target)
+    return true
 end)
+
+--- Records hit payloads before the shared router filters them, making missing
+--- player ownership or weapon classification visible to the debug command.
+local function observeAndRouteHit(attack, source)
+    attack = attack or {}
+    SkillDebug.traceEvent(SKILL_ID, "outgoing hit received", {
+        source = source,
+        successful = attack.successful,
+        weapon = SkillDebug.objectId(attack.weapon),
+    })
+    local routed = routeOutgoingHit(attack, source)
+    if not routed then
+        local weapon = Common.weaponFromAttack(attack, self)
+        local weaponRecord = weapon and types.Weapon.record(weapon) or nil
+        lastHitDebug = {
+            source = source,
+            successful = attack.successful,
+            healthDamage = Common.healthDamage(attack),
+            weaponId = weaponRecord and weaponRecord.id or nil,
+            weaponType = weaponRecord and weaponRecord.type or nil,
+            shortBlade = Common.isShortBlade(weapon),
+            playerOwned = attack.skillPerksPlayerOwned == true,
+            aRank = aRank(),
+            stacksBefore = tempoStacks,
+            result = "rejected by outgoing-hit router",
+        }
+    end
+    SkillDebug.traceEvent(SKILL_ID, routed and "outgoing hit accepted" or "outgoing hit rejected", lastHitDebug)
+end
 
 interfaces.ErnPerkFramework.registerOnHitHandler({
     id = ids.A1 .. "_shortblade_hit",
     priority = 430,
+    direction = interfaces.ErnPerkFramework.HIT_DIRECTION.Outgoing,
     handler = function(attack)
-        routeOutgoingHit(attack, "direct")
+        observeAndRouteHit(attack, attack.skillPerksHitSource or "framework")
     end,
 })
 
@@ -222,13 +283,62 @@ local function onLoad(data)
     vitalTargets = {}
     vitalTargetKey = nil
     bleeds = {}
+    -- restoreAndReverse removes the serialized modifier to prevent doubling;
+    -- rebuild it immediately from the restored Tempo state.
+    updateTempo()
+end
+
+local function consolePrint(message)
+    ui.printToConsole(tostring(message), ui.CONSOLE_COLOR.Default)
+end
+
+--- Prints the live Tempo state and the most recent routed hit to the regular
+--- console. This remains silent during normal play.
+local function onConsoleCommand(mode, command)
+    if SkillDebug.handleTraceCommand({
+        name = "Short Blade",
+        skillId = SKILL_ID,
+        commands = { "luasb debug", "luashortblade debug" },
+    }, command) then
+        return
+    end
+    command = tostring(command or ""):lower():match("^%s*(.-)%s*$")
+    if command ~= "luasb debug" and command ~= "luashortblade debug" then
+        return
+    end
+    SkillDebug.describe({ name = "Short Blade", skillId = SKILL_ID, actor = self, ids = ids })
+
+    local speed = types.Actor.stats.attributes.speed(self)
+    local agility = types.Actor.stats.attributes.agility(self)
+    consolePrint("Short Blade Tempo: A=" .. tostring(aRank())
+        .. " stacks=" .. tostring(tempoStacks)
+        .. " timer=" .. tostring(tempoTimer)
+        .. " Speed(base/mod/modified)=" .. tostring(speed.base)
+        .. "/" .. tostring(speed.modifier)
+        .. "/" .. tostring(speed.modified)
+        .. " Agility(modified)=" .. tostring(agility.modified))
+    if not lastHitDebug then
+        consolePrint("Short Blade last hit: none seen.")
+        return
+    end
+    consolePrint("Short Blade last hit: source=" .. tostring(lastHitDebug.source)
+        .. " success=" .. tostring(lastHitDebug.successful)
+        .. " damage=" .. tostring(lastHitDebug.healthDamage)
+        .. " weapon=" .. tostring(lastHitDebug.weaponId)
+        .. " type=" .. tostring(lastHitDebug.weaponType)
+        .. " shortBlade=" .. tostring(lastHitDebug.shortBlade)
+        .. " playerOwned=" .. tostring(lastHitDebug.playerOwned)
+        .. " A=" .. tostring(lastHitDebug.aRank)
+        .. " stacks=" .. tostring(lastHitDebug.stacksBefore)
+        .. "->" .. tostring(lastHitDebug.stacksAfter)
+        .. " result=" .. tostring(lastHitDebug.result))
 end
 
 Common.registerStealthPerks(SKILL_ID, "Short Blade", ids, {
-    A1 = { localizedName = "Blade Tempo", localizedFlavour = "The first cut starts the rhythm. The second teaches your feet where the fight is going.", localizedDescription = "Successful Short Blade hits grant +3 Speed per stack, up to 3 stacks. Stacks decay after 4 seconds without a hit.", onRemove = clearShortBlade },
-    A2 = { localizedName = "Quickened Edge", localizedFlavour = "Your hand moves before hesitation has a name.", localizedDescription = "Blade Tempo grants +5 Speed per stack.", onRemove = clearShortBlade },
-    A3 = { localizedName = "Knife Rhythm", localizedFlavour = "Each wound pulls the next one closer.", localizedDescription = "Blade Tempo stack cap rises to 5.", onRemove = clearShortBlade },
-    A4 = { localizedName = "Eightfold Motion", localizedFlavour = "At full speed, the blade is less a weapon than a weather pattern.", localizedDescription = "Blade Tempo stack cap rises to 8. At maximum stacks, gain +10 Agility.", onRemove = clearShortBlade },
+    A1 = { localizedName = "Blade Tempo", localizedFlavour = "The first cut starts the rhythm. The second teaches your feet where the fight is going.", localizedDescription = "Successful Short Blade hits grant +3 Speed per stack, up to 3 stacks. Stacks decay after 4 seconds without a hit.", onAdd = updateTempo, onRemove = clearShortBlade },
+    A2 = { localizedName = "Quickened Edge", localizedFlavour = "Your hand moves before hesitation has a name.", localizedDescription = "Blade Tempo grants +5 Speed per stack.", onAdd = updateTempo, onRemove = clearShortBlade },
+    A3 = { localizedName = "Knife Rhythm", localizedFlavour = "Each wound pulls the next one closer.", localizedDescription = "Blade Tempo stack cap rises to 5.", onAdd = updateTempo, onRemove = clearShortBlade },
+    A4 = { localizedName = "Eightfold Motion", localizedFlavour = "At full speed, the blade is less a weapon than a weather pattern.", localizedDescription = "Blade Tempo stack cap rises to 8. At maximum stacks, gain +10 Agility.", onAdd = updateTempo, onRemove = clearShortBlade },
     B1 = { localizedName = "Opening Strike", localizedFlavour = "The first touch decides how much room the enemy has left to make mistakes.", localizedDescription = "The first Short Blade hit against each target deals bonus damage equal to Short Blade / 5.", onRemove = clearShortBlade },
     B2 = { localizedName = "First Blood Lesson", localizedFlavour = "A surprised enemy does not get a warning. They get a conclusion.", localizedDescription = "Opening Strike increases to Short Blade / 3, doubled if the hit is an unaware strike.", onRemove = clearShortBlade },
     C1 = { localizedName = "Vital Strike", localizedFlavour = "You stop aiming for the body and start aiming for decisions the body cannot survive.", localizedDescription = "Successive hits against the same target within 5 seconds deal +3% damage per stack, up to 5 stacks.", onRemove = clearShortBlade },
@@ -240,9 +350,11 @@ Common.registerStealthPerks(SKILL_ID, "Short Blade", ids, {
 return {
     eventHandlers = {
         OMWMusicCombatTargetsChanged = onCombatTargetsChanged,
-        SPerks_PlayerHitActor = function(attack)
-            routeOutgoingHit(attack, "bridge")
-        end,
     },
-    engineHandlers = { onUpdate = onUpdate, onSave = onSave, onLoad = onLoad },
+    engineHandlers = {
+        onUpdate = onUpdate,
+        onSave = onSave,
+        onLoad = onLoad,
+        onConsoleCommand = onConsoleCommand,
+    },
 }
