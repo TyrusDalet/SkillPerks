@@ -15,6 +15,7 @@ local ui = require("openmw.ui")
 
 local Common = require("scripts.SkillPerks.magic.common")
 local StatTracker = require("scripts.SkillPerks.shared.stat_tracker")
+local SkillDebug  = require("scripts.SkillPerks.shared.debug")
 
 local ids = Common.ids("conjuration")
 local effects = StatTracker.newActiveEffectTracker(self)
@@ -104,6 +105,10 @@ interfaces.ErnPerkFramework.registerSkillUseHandler({
     skill="conjuration", playerCastOnly=true,
     handler=function(event)
         local list = summonEffects(event.spell)
+        SkillDebug.traceEvent("conjuration", "skill-use event", {
+            spell = event and event.spell and event.spell.id,
+            summonEffects = #list,
+        })
         if #list == 0 then return end
 
         -- The framework's skill event is authoritative even on animation sets
@@ -197,6 +202,10 @@ end
 -- through Core 0's global dynamic-spell service works for temporary summoned
 -- actors that do not accept ordinary target-local events.
 local function applySummonEmpowerment(actor, b)
+    SkillDebug.traceEvent("conjuration", "summon discovered", {
+        actor = SkillDebug.objectId(actor),
+        rank = b,
+    })
     local percent = b == 2 and 0.35 or 0.25
     local duration = summonDuration(summonCast)
     local spellEffects = {}
@@ -288,6 +297,7 @@ local function applySummonEmpowerment(actor, b)
         expectedMaximum = (tonumber(health.base) or 0) + healthBonus,
         duration = duration,
     }
+    SkillDebug.traceEvent("conjuration", "summon empowered", debugState.lastEmpowerment)
 end
 
 local function empowerNewSummons()
@@ -337,8 +347,16 @@ end
 
 -- Reports each stage of the summon bridge without requiring verbose Lua logs.
 local function onConsoleCommand(mode, command)
+    if SkillDebug.handleTraceCommand({
+        name = "Conjuration",
+        skillId = "conjuration",
+        commands = { "luaconj debug", "luaconjuration debug" },
+    }, command) then
+        return
+    end
     command = tostring(command or ""):lower():match("^%s*(.-)%s*$")
-    if command ~= "luaconj debug" then return end
+    if command ~= "luaconj debug" and command ~= "luaconjuration debug" then return end
+    SkillDebug.describe({ name = "Conjuration", skillId = "conjuration", actor = self, ids = ids })
 
     consolePrint("Conjuration summon bridge:"
         .. " B=" .. tostring(rank("B"))

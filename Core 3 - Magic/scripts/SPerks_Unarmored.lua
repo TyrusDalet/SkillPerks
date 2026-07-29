@@ -13,6 +13,7 @@ local self = require("openmw.self")
 
 local Common = require("scripts.SkillPerks.magic.common")
 local StatTracker = require("scripts.SkillPerks.shared.stat_tracker")
+local SkillDebug  = require("scripts.SkillPerks.shared.debug")
 
 local ids = Common.ids("unarmored")
 local effectTracker = StatTracker.newActiveEffectTracker(self)
@@ -78,7 +79,13 @@ interfaces.ErnPerkFramework.registerCalculationHandler({
     calculation = CALCULATION.HIT_DAMAGE_HEALTH,
     operation = OPERATION.Modifier,
     priority = 700,
+    direction = interfaces.ErnPerkFramework.HIT_DIRECTION.Incoming,
     handler = function(data)
+        SkillDebug.traceEvent("unarmored", "Body as Focus check", {
+            damage = data and data.value,
+            fatigueRatio = Common.dynamicRatio(self, "fatigue"),
+            fullyUnarmored = fullyUnarmored(),
+        })
         if rank("D") == 0 or not fullyUnarmored()
                 or Common.dynamicRatio(self, "fatigue") < 0.25 then
             return nil
@@ -114,6 +121,27 @@ local function onUpdate(dt)
     updateCastingSpeed()
 end
 
+-- Confirms empty-slot gates and the resources used by Body as Focus.
+local onConsoleCommand = SkillDebug.makeHandler({
+    name = "Unarmored",
+    skillId = "unarmored",
+    actor = self,
+    ids = ids,
+    commands = { "luaunarmored debug", "luaunarm debug" },
+    snapshot = function()
+        return {
+            string.format(
+                "Armor gate: emptySlots=%d/%d mostlyUnarmored=%s",
+                emptySlots(),
+                #ARMOR_SLOTS,
+                tostring(mostlyUnarmored())
+            ),
+            "Health: " .. SkillDebug.resourceSummary(self, "health"),
+            "Fatigue: " .. SkillDebug.resourceSummary(self, "fatigue"),
+        }
+    end,
+})
+
 Common.registerMagicPerks("unarmored", "Unarmored", ids, {
     A1={localizedName="Empty Hand Discipline",localizedFlavour="Steel is a crutch. Your body has learned to carry the ward itself.",localizedDescription="Each empty armor slot grants -2 Sound and +1 Shield.",onAdd=refreshPassives,onRemove=clear},
     A2={localizedName="Unencumbered Form",localizedFlavour="Every discarded plate leaves another channel open to your will.",localizedDescription="Each empty armor slot now grants -3 Sound and +2 Shield.",onAdd=refreshPassives,onRemove=clear},
@@ -129,6 +157,7 @@ Common.registerMagicPerks("unarmored", "Unarmored", ids, {
 
 return {
     engineHandlers = {
+        onConsoleCommand = onConsoleCommand,
         onUpdate = onUpdate,
         onSave = function() return { effects = effectTracker.snapshot() } end,
         onLoad = function(data)

@@ -14,6 +14,7 @@ local self=require("openmw.self")
 local Common=require("scripts.SkillPerks.magic.common")
 local MagicDetection=require("scripts.SkillPerks.shared.magic_detection")
 local StatTracker=require("scripts.SkillPerks.shared.stat_tracker")
+local SkillDebug=require("scripts.SkillPerks.shared.debug")
 
 local ids=Common.ids("enchant")
 local effects=StatTracker.newActiveEffectTracker(self)
@@ -109,6 +110,10 @@ end)
 
 local function goldCount() return types.Actor.inventory(self):countOf("gold_001") end
 local function onUiModeChanged(data)
+    SkillDebug.traceEvent("enchant", "UI mode changed", {
+        newMode = data and data.newMode,
+        oldMode = data and data.oldMode,
+    })
     if data.newMode=="Enchanting" then
         selfEnchanting=data.arg==nil
         if data.arg~=nil then serviceGold=goldCount() end
@@ -148,6 +153,11 @@ end
 -- resolved effects through a fresh dynamic spell gives A3/A4 a literal free
 -- echo while preventing recursion: the generated spell has no source item.
 local function onMagicEffectLanded(data)
+    SkillDebug.traceEvent("enchant", "magic effect landed", {
+        item = data and SkillDebug.objectId(data.item),
+        spell = data and data.spellId,
+        target = data and SkillDebug.objectId(data.target),
+    })
     local a=rank("A")
     if a<3 or not data or not data.item or not data.target or not data.target:isValid() then return end
     local enchantment=MagicDetection.getEnchantmentRecord(data.item)
@@ -231,6 +241,33 @@ local function onUpdate(dt)
     end
 end
 
+-- Reports catalogue growth, circuit stacks, charge reserve, and Enchant UI state.
+local onConsoleCommand = SkillDebug.makeHandler({
+    name = "Enchant",
+    skillId = "enchant",
+    actor = self,
+    ids = ids,
+    commands = { "luaenchant debug" },
+    snapshot = function()
+        return {
+            string.format(
+                "Catalogue: use=%d strike=%d constant=%d",
+                SkillDebug.count(catalogue.CastOnUse),
+                SkillDebug.count(catalogue.CastOnStrike),
+                SkillDebug.count(catalogue.ConstantEffect)
+            ),
+            string.format(
+                "Circuit: stacks=%d reserve=%s timer=%s rechargeBefore=%s",
+                SkillDebug.count(stacks),
+                SkillDebug.number(reserve),
+                SkillDebug.number(reserveTimer),
+                SkillDebug.value(rechargeBefore)
+            ),
+            string.format("Enchanting: active=%s serviceGold=%s", tostring(selfEnchanting), SkillDebug.value(serviceGold)),
+        }
+    end,
+})
+
 Common.registerMagicPerks("enchant","Enchant",ids,{
     A1={localizedName="Enchanter's Codex",localizedFlavour="Every awakened effect writes one more line into a catalogue no mortal library could contain.",localizedDescription="Catalogue unique effect/trigger pairs. Every 5 stacks refunds 1% of NPC enchanting costs.",onAdd=refresh,onRemove=clear},
     A2={localizedName="Living Catalogue",localizedFlavour="The Codex opens inside your hands while you bind a new enchantment.",localizedDescription="While self-enchanting, each catalogue stack grants +1 Enchant.",onAdd=refresh,onRemove=clear},
@@ -250,6 +287,7 @@ return {
         SPerks_MagicEffectLanded=onMagicEffectLanded,
     },
     engineHandlers={
+        onConsoleCommand=onConsoleCommand,
         onUpdate=onUpdate,
         onSave=function() return {catalogue=catalogue,stacks=stacks,reserve=reserve,effects=effects.snapshot()} end,
         onLoad=function(data)

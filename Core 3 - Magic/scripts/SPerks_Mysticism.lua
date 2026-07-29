@@ -14,6 +14,7 @@ local self = require("openmw.self")
 local Common = require("scripts.SkillPerks.magic.common")
 local MagicDetection = require("scripts.SkillPerks.shared.magic_detection")
 local StatTracker = require("scripts.SkillPerks.shared.stat_tracker")
+local SkillDebug  = require("scripts.SkillPerks.shared.debug")
 
 local ids = Common.ids("mysticism")
 local effects = StatTracker.newActiveEffectTracker(self)
@@ -64,6 +65,10 @@ local function distributeCharge(amount)
 end
 
 local function onSpellLanded(data)
+    SkillDebug.traceEvent("mysticism", "spell landed", {
+        spell = data and data.spellId,
+        target = data and SkillDebug.objectId(data.target),
+    })
     if not data or not data.target or not data.target:isValid()
             or not Common.isPlayerCastLandedSpell(data) then return end
     local soultrap
@@ -99,6 +104,10 @@ end
 local function onActorActivated(data)
     local d = rank("D")
     local target = data and data.target
+    SkillDebug.traceEvent("mysticism", "actor activated", {
+        dRank = d,
+        target = SkillDebug.objectId(target),
+    })
     if d == 0 or not target or not target:isValid()
             or Common.playerSpellEffectMagnitude(self, "telekinesis") <= 0 then return end
     local hostile = true
@@ -141,6 +150,22 @@ local function onUpdate(dt)
     if updateTimer <= 0 then updateTimer = 0.2 refreshHungrySoul() end
 end
 
+-- Shows soul-echo target memory and the resources used by Mysticism riders.
+local onConsoleCommand = SkillDebug.makeHandler({
+    name = "Mysticism",
+    skillId = "mysticism",
+    actor = self,
+    ids = ids,
+    commands = { "luamysticism debug", "luamyst debug" },
+    snapshot = function()
+        return {
+            string.format("Echoed targets=%d updateTimer=%s", SkillDebug.count(echoedTargets), SkillDebug.number(updateTimer)),
+            "Magicka: " .. SkillDebug.resourceSummary(self, "magicka"),
+            "Fatigue: " .. SkillDebug.resourceSummary(self, "fatigue"),
+        }
+    end,
+})
+
 Common.registerMagicPerks("mysticism", "Mysticism", ids, {
     A1={localizedName="Echo of the Soul",localizedFlavour="The soul answers the trap before the gem has even learned its name.",localizedDescription="The first Soultrap on an actor converts 5% of its soul value into charge for equipped enchanted items.",onRemove=clear},
     A2={localizedName="Resonant Capture",localizedFlavour="The captive spirit rings through every prepared vessel you carry.",localizedDescription="Echo of the Soul converts 10%.",onRemove=clear},
@@ -163,6 +188,7 @@ return {
         end,
     },
     engineHandlers = {
+        onConsoleCommand=onConsoleCommand,
         onUpdate=onUpdate,
         onSave=function() return { effects=effects.snapshot() } end,
         onLoad=function(data) effects.restoreAndReverse(data and data.effects) echoedTargets={} end,

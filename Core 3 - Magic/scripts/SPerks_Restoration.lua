@@ -17,6 +17,7 @@ local Common = require("scripts.SkillPerks.magic.common")
 local MagicDetection = require("scripts.SkillPerks.shared.magic_detection")
 local WardHud = require("scripts.SkillPerks.hud.ward")
 local settings = require("scripts.SkillPerks.Settings.settings")
+local SkillDebug = require("scripts.SkillPerks.shared.debug")
 
 settings.registerWardHudSettings()
 
@@ -83,6 +84,11 @@ end
 local function addOverflow(resource, amount)
     local state = states[resource]
     local allowed = cap(resource)
+    SkillDebug.traceEvent("restoration", "Ward overflow check", {
+        amount = amount,
+        cap = allowed,
+        resource = resource,
+    })
     if allowed <= 0 or amount <= 0 then return end
     local cancel = math.min(state.drain, amount)
     state.drain = state.drain - cancel
@@ -93,6 +99,11 @@ end
 
 local function bufferDamage(resource, incoming)
     local state = states[resource]
+    SkillDebug.traceEvent("restoration", "Ward damage check", {
+        buffer = state.buffer,
+        incoming = incoming,
+        resource = resource,
+    })
     if incoming <= 0 or state.buffer <= 0 or cap(resource) <= 0 then return incoming end
     local queued = incoming * 0.5
     local reserved = math.min(queued, state.buffer)
@@ -108,6 +119,7 @@ local function registerBufferCalculation(resource,calculation)
         calculation=calculation,
         operation=interfaces.ErnPerkFramework.CALCULATION_OPERATION.Modifier,
         priority=700,
+        direction=interfaces.ErnPerkFramework.HIT_DIRECTION.Incoming,
         handler=function(data) return bufferDamage(resource, data.value) end,
     })
 end
@@ -124,6 +136,10 @@ interfaces.ErnPerkFramework.registerSkillUseHandler({
     id="SkillPerks_restoration_linked_restore",
     skill="restoration", playerCastOnly=true,
     handler=function(event)
+        SkillDebug.traceEvent("restoration", "skill-use event", {
+            cost = event and event.cost,
+            spell = event and event.spell and event.spell.id,
+        })
         local restoreEffects = {}
         for _, effect in ipairs(event.spell and event.spell.effects or {}) do
             if effect.id == "restorehealth" or effect.id == "restorefatigue" then
@@ -226,6 +242,9 @@ end
 --- separate actual healing from Ward-generating overflow.
 local function onSpellforgeMagicHit(data)
     data = data or {}
+    SkillDebug.traceEvent("restoration", "Spellforge magic hit", {
+        spell = data.spellId,
+    })
     if not data.spellId then return end
     local now = core.getSimulationTime()
     if pendingSpellforgeCast and pendingSpellforgeCast.expires >= now then
@@ -251,6 +270,13 @@ local function onSpellforgeEffectApplied(data)
     local magnitude = math.max(0, tonumber(data.magnitude) or 0)
     local now = core.getSimulationTime()
     local snapshot = spellforgeSnapshots[spellId]
+    SkillDebug.traceEvent("restoration", "Spellforge effect applied", {
+        duration = duration,
+        effect = effectId,
+        magnitude = magnitude,
+        snapshot = snapshot ~= nil,
+        spell = spellId,
+    })
     if spellId == "" or not snapshot or snapshot.expires < now then
         return
     end
@@ -342,7 +368,12 @@ local SWAP = {
 
 interfaces.ErnPerkFramework.registerOnHitHandler({
     id="SkillPerks_restoration_warding_reprise", priority=675,
+    direction=interfaces.ErnPerkFramework.HIT_DIRECTION.Incoming,
     handler=function(attack)
+        SkillDebug.traceEvent("restoration", "Warding Reprisal hit", {
+            attacker = attack and SkillDebug.objectId(attack.attacker),
+            healthDamage = attack and attack.damage and attack.damage.health,
+        })
         if rank("D") == 0 or not attack.attacker or attack.attacker == self
                 or not attack.attacker:isValid() or not attack.damage then return end
         if attack.target and attack.target ~= self then return end
@@ -386,8 +417,16 @@ end
 --- Reports the successful cast and active-effect sides of Ward collection.
 --- Use after casting a Restore spell to diagnose generated-spell interop.
 local function onConsoleCommand(mode, command)
+    if SkillDebug.handleTraceCommand({
+        name = "Restoration",
+        skillId = "restoration",
+        commands = { "luarest debug", "luarestoration debug" },
+    }, command) then
+        return
+    end
     command = tostring(command or ""):lower():match("^%s*(.-)%s*$")
-    if command ~= "luarest debug" then return end
+    if command ~= "luarest debug" and command ~= "luarestoration debug" then return end
+    SkillDebug.describe({ name = "Restoration", skillId = "restoration", actor = self, ids = ids })
 
     local cast = debugState.lastCast
     if cast then

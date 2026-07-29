@@ -14,6 +14,7 @@ local self = require("openmw.self")
 local Common = require("scripts.SkillPerks.magic.common")
 local CombatMath = require("scripts.SkillPerks.shared.combat_math")
 local StatTracker = require("scripts.SkillPerks.shared.stat_tracker")
+local SkillDebug  = require("scripts.SkillPerks.shared.debug")
 
 local ids = Common.ids("alteration")
 local effects = StatTracker.newActiveEffectTracker(self)
@@ -75,6 +76,10 @@ interfaces.ErnPerkFramework.registerSkillUseHandler({
 })
 
 local function onSpellLanded(data)
+    SkillDebug.traceEvent("alteration", "spell landed", {
+        spell = data and data.spellId,
+        target = data and SkillDebug.objectId(data.target),
+    })
     if rank("A") < 3 or not data or not data.target or not data.target:isValid() then return end
     if not Common.isPlayerCastLandedSpell(data) then return end
     for _, effect in ipairs(data.effects or {}) do
@@ -102,6 +107,9 @@ local function qualifyingShieldMagnitude(effectId)
 end
 
 local function accrueForce(attack)
+    SkillDebug.traceEvent("alteration", "Kinetic Shell incoming check", {
+        damage = attack and attack.damage and attack.damage.health,
+    })
     if rank("D") == 0 or attack.attacker == self or not attack.damage then return end
     if attack.target and attack.target ~= self then return end
     local lost = math.max(0, tonumber(attack.damage.health) or 0)
@@ -117,6 +125,9 @@ local function accrueForce(attack)
 end
 
 local function dischargeForce(attack)
+    SkillDebug.traceEvent("alteration", "Kinetic Shell discharge check", {
+        successful = attack and attack.successful,
+    })
     local d = rank("D")
     if d == 0 or attack.attacker ~= self or attack.successful == false then return end
     local target = attack.target or attack.victim or attack.defender
@@ -181,6 +192,27 @@ local function onUpdate(dt)
     end
 end
 
+-- Exposes stored Kinetic Shell force and timed Alteration rider effects.
+local onConsoleCommand = SkillDebug.makeHandler({
+    name = "Alteration",
+    skillId = "alteration",
+    actor = self,
+    ids = ids,
+    commands = { "luaalteration debug", "luaalt debug" },
+    snapshot = function()
+        return {
+            string.format(
+                "Kinetic pools: shield=%s fire=%s frost=%s shock=%s",
+                SkillDebug.number(pools.shield),
+                SkillDebug.number(pools.fireshield),
+                SkillDebug.number(pools.frostshield),
+                SkillDebug.number(pools.lightningshield)
+            ),
+            string.format("Timed riders=%d updateTimer=%s", SkillDebug.count(expiry), SkillDebug.number(updateTimer)),
+        }
+    end,
+})
+
 Common.registerMagicPerks("alteration", "Alteration", ids, {
     A1={localizedName="Effortless Casting",localizedFlavour="Water yields to the mage who has stopped struggling against it.",localizedDescription="Player-cast Swift Swim eases exertion; Water Breathing also grants brief Night-Eye.",onAdd=refresh,onRemove=clear},
     A2={localizedName="Light Step",localizedFlavour="The earth receives you gently because you have learned how little of yourself to give it.",localizedDescription="Player-cast Jump also eases the Fatigue spent moving and leaping.",onAdd=refresh,onRemove=clear},
@@ -197,6 +229,7 @@ Common.registerMagicPerks("alteration", "Alteration", ids, {
 return {
     eventHandlers={ SPerks_MagicEffectLanded=onSpellLanded },
     engineHandlers={
+        onConsoleCommand=onConsoleCommand,
         onUpdate=onUpdate,
         onSave=function() return {effects=effects.snapshot(),pools=pools,expiry=expiry} end,
         onLoad=function(data)

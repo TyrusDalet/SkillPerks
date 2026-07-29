@@ -14,6 +14,7 @@ local ui = require("openmw.ui")
 local self = require("openmw.self")
 
 local Common = require("scripts.SkillPerks.magic.common")
+local SkillDebug = require("scripts.SkillPerks.shared.debug")
 
 local ids=Common.ids("alchemy")
 local seenSpells={}
@@ -46,6 +47,10 @@ local CURE_MAP={
 }
 
 local function applyReaction(effect,a)
+    SkillDebug.traceEvent("alchemy", "Alchemical Reaction check", {
+        effect = effect and effect.id,
+        rank = a,
+    })
     local id=effect.id
     local magnitude=math.max(0,tonumber(effect.magnitudeThisFrame) or 0)
     local natural=math.max(1,tonumber(effect.duration) or tonumber(effect.durationLeft) or 1)
@@ -78,6 +83,11 @@ local function applyReaction(effect,a)
         id=targetId,magnitudeMin=targetMagnitude,duration=duration,
         affectedAttribute=effect.affectedAttribute,affectedSkill=effect.affectedSkill,
     }},{ignoreReflect=true,ignoreResistances=true,ignoreSpellAbsorption=true})
+    SkillDebug.traceEvent("alchemy", "Alchemical Reaction applied", {
+        duration = duration,
+        effect = targetId,
+        magnitude = targetMagnitude,
+    })
     reactionExpiry[reactionKey]=core.getSimulationTime()+duration
 end
 
@@ -175,6 +185,10 @@ local function preserveConsumedPotions()
 end
 
 local function onUiModeChanged(data)
+    SkillDebug.traceEvent("alchemy", "UI mode changed", {
+        newMode = data and data.newMode,
+        oldMode = data and data.oldMode,
+    })
     if data.newMode=="Alchemy" then
         inAlchemy=true
         alchemySession={ingredients=countsOf(types.Ingredient),potions=countsOf(types.Potion)}
@@ -213,6 +227,31 @@ local function onUpdate(dt)
     if timer<=0 then timer=0.5 preserveConsumedPotions() end
 end
 
+-- Reports potion/ingredient inventory tracking and active reaction bookkeeping.
+local onConsoleCommand = SkillDebug.makeHandler({
+    name = "Alchemy",
+    skillId = "alchemy",
+    actor = self,
+    ids = ids,
+    commands = { "luaalchemy debug", "luaalch debug" },
+    snapshot = function()
+        return {
+            string.format(
+                "Alchemy UI: active=%s session=%s timer=%s",
+                tostring(inAlchemy),
+                tostring(alchemySession ~= nil),
+                SkillDebug.number(timer)
+            ),
+            string.format(
+                "Tracking: potions=%d seenSpells=%d activeReactions=%d",
+                SkillDebug.count(potionSnapshot),
+                SkillDebug.count(seenSpells),
+                SkillDebug.count(reactionExpiry)
+            ),
+        }
+    end,
+})
+
 Common.registerMagicPerks("alchemy","Alchemy",ids,{
     A1={localizedName="Alchemical Reaction",localizedFlavour="A draught is not one effect but a conversation, and you have learned to hear the answer.",localizedDescription="Potion effects create related secondary effects at 20% strength.",onRemove=clear},
     A2={localizedName="Catalytic Insight",localizedFlavour="Every tincture carries another possibility waiting for the practiced body to reveal it.",localizedDescription="Alchemical Reaction rises to 30% with stronger minimum effects.",onRemove=clear},
@@ -229,6 +268,7 @@ Common.registerMagicPerks("alchemy","Alchemy",ids,{
 return {
     eventHandlers={SPerks_UiModeChanged=onUiModeChanged},
     engineHandlers={
+        onConsoleCommand=onConsoleCommand,
         onUpdate=onUpdate,
         onSave=function() return {potionSnapshot=potionSnapshot,reactionExpiry=reactionExpiry} end,
         onLoad=function(data)

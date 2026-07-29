@@ -14,6 +14,7 @@ local self = require("openmw.self")
 
 local Common = require("scripts.SkillPerks.magic.common")
 local StatTracker = require("scripts.SkillPerks.shared.stat_tracker")
+local SkillDebug  = require("scripts.SkillPerks.shared.debug")
 
 local ids = Common.ids("illusion")
 local effects = StatTracker.newActiveEffectTracker(self)
@@ -39,12 +40,20 @@ local function rebuildTheftBonus()
 end
 
 local function onMindTheftDelta(data)
+    SkillDebug.traceEvent("illusion", "Mind Theft delta", {
+        key = data and data.key,
+        remove = data and data.remove,
+    })
     if not data or not data.key then return end
     if data.remove then thefts[data.key] = nil else thefts[data.key] = data.drains or {} end
     rebuildTheftBonus()
 end
 
 local function onSpellLanded(data)
+    SkillDebug.traceEvent("illusion", "spell landed", {
+        spell = data and data.spellId,
+        target = data and SkillDebug.objectId(data.target),
+    })
     if not data or not data.target or not data.target:isValid()
             or not Common.isPlayerCastLandedSpell(data) then return end
     if rank("A") >= 3 and hasEffect(data, "paralyze") then
@@ -71,7 +80,11 @@ end
 
 interfaces.ErnPerkFramework.registerOnHitHandler({
     id = "SkillPerks_illusion_mind_games_hit", priority = 650,
+    direction = interfaces.ErnPerkFramework.HIT_DIRECTION.Incoming,
     handler = function(attack)
+        SkillDebug.traceEvent("illusion", "Mind Games hit check", {
+            successful = attack and attack.successful,
+        })
         if attack.successful == false and rank("A") >= 2
                 and Common.playerSpellEffectMagnitude(self, "sanctuary") > 0 then
             Common.restoreResource(self, "fatigue", 5, ids.A2)
@@ -93,6 +106,7 @@ for _, calculation in ipairs({
         calculation = calculation,
         operation = interfaces.ErnPerkFramework.CALCULATION_OPERATION.Divider,
         priority = 650,
+        direction = interfaces.ErnPerkFramework.HIT_DIRECTION.Incoming,
         handler = reduction,
     })
 end
@@ -101,6 +115,10 @@ interfaces.ErnPerkFramework.registerSkillUseHandler({
     id = "SkillPerks_illusion_measured_deception",
     skill = "illusion", playerCastOnly = true,
     handler = function(event)
+        SkillDebug.traceEvent("illusion", "skill-use event", {
+            cost = event and event.cost,
+            spell = event and event.spell and event.spell.id,
+        })
         if rank("B") == 0 or not event.spell then return end
         local nonSelf = false
         for _, effect in ipairs(event.spell.effects or {}) do
@@ -165,6 +183,26 @@ local function clear()
     thefts, pendingChecks = {}, {}
 end
 
+-- Reports pending spell-result checks and active Mind Theft bookkeeping.
+local onConsoleCommand = SkillDebug.makeHandler({
+    name = "Illusion",
+    skillId = "illusion",
+    actor = self,
+    ids = ids,
+    commands = { "luaillusion debug", "luaillu debug" },
+    snapshot = function()
+        return {
+            string.format(
+                "Tracking: pendingChecks=%d mindThefts=%d pollTimer=%s",
+                #pendingChecks,
+                SkillDebug.count(thefts),
+                SkillDebug.number(pollTimer)
+            ),
+            "Magicka: " .. SkillDebug.resourceSummary(self, "magicka"),
+        }
+    end,
+})
+
 Common.registerMagicPerks("illusion", "Illusion", ids, {
     A1={localizedName="Eyes Against the Dark",localizedFlavour="Once you have commanded darkness, it can no longer close over you without resistance.",localizedDescription="Player-cast Night-Eye reduces incoming Blind magnitude by up to its own magnitude.",onAdd=refreshPassives,onRemove=clear},
     A2={localizedName="Untouchable Doubt",localizedFlavour="Every failed strike feeds the certainty that you were never where they believed.",localizedDescription="While player-cast Sanctuary is active, attacks that miss you restore 5 Fatigue.",onRemove=clear},
@@ -184,6 +222,7 @@ return {
         SPerks_IllusionMindTheftDelta = onMindTheftDelta,
     },
     engineHandlers = {
+        onConsoleCommand = onConsoleCommand,
         onUpdate = onUpdate,
         onSave = function() return { effects=effects.snapshot(), stats=theftStats.snapshot(), thefts=thefts } end,
         onLoad = function(data)

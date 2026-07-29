@@ -12,6 +12,7 @@ local types = require("openmw.types")
 
 local ns = require("scripts.SkillPerks.namespace")
 local ChainRequirements = require("scripts.SkillPerks.shared.chain_requirements")
+local SkillDebug = require("scripts.SkillPerks.shared.debug")
 local MagicConstellations = require("scripts.SkillPerks.constellations.magic")
 local MagicDetection = require("scripts.SkillPerks.shared.magic_detection")
 
@@ -170,8 +171,8 @@ function Common.registerMagicPerks(skillId, skillName, ids, entries)
                 category = ChainRequirements.category("Magic", skillName, SLOT_MENU_ORDER[slot]),
                 art = entry.art or "textures\\levelup\\mage",
                 requirements = requirements,
-                onAdd = entry.onAdd or function() end,
-                onRemove = entry.onRemove or function() end,
+                onAdd = SkillDebug.wrapCallback(skillId, slot .. " applied/resynced", entry.onAdd),
+                onRemove = SkillDebug.wrapCallback(skillId, slot .. " removed", entry.onRemove),
             })
         end
     end

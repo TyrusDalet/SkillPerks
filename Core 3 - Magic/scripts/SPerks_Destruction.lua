@@ -15,6 +15,7 @@ local self = require("openmw.self")
 
 local Common = require("scripts.SkillPerks.magic.common")
 local MagicDetection = require("scripts.SkillPerks.shared.magic_detection")
+local SkillDebug = require("scripts.SkillPerks.shared.debug")
 
 local ids=Common.ids("destruction")
 local castCosts={}
@@ -48,6 +49,26 @@ local ELEMENT = {
 }
 local DRAIN_RESOURCE={drainhealth="health",drainfatigue="fatigue",drainmagicka="magicka"}
 
+-- Shows the cast-cost ledger and reflection suppression cache used by riders.
+local onConsoleCommand = SkillDebug.makeHandler({
+    name = "Destruction",
+    skillId = "destruction",
+    actor = self,
+    ids = ids,
+    commands = { "luadestruction debug", "luadest debug" },
+    snapshot = function()
+        return {
+            string.format(
+                "Tracking: castCosts=%d reflectedEffects=%d reflectionPoll=%s",
+                SkillDebug.count(castCosts),
+                SkillDebug.count(reflectedSeen),
+                SkillDebug.number(reflectionTimer)
+            ),
+            "Magicka: " .. SkillDebug.resourceSummary(self, "magicka"),
+        }
+    end,
+})
+
 local function chainShock(origin,amount)
     for _,actor in ipairs(nearby.actors) do
         if actor ~= origin and actor:isValid() and targetRatio(actor,"magicka") < 0.25 then
@@ -59,6 +80,10 @@ end
 
 local function onSpellLanded(data)
     local target=data and data.target
+    SkillDebug.traceEvent("destruction", "spell landed", {
+        spell = data and data.spellId,
+        target = SkillDebug.objectId(target),
+    })
     if not target or not target:isValid() then return end
     local c=rank("C")
     local playerCast=Common.isPlayerCastLandedSpell(data)
@@ -184,11 +209,14 @@ return {
             Common.restoreResource(self,"magicka",data and data.amount or 0,ids["B"..rank("B")])
         end,
     },
-    engineHandlers={onUpdate=function(dt)
-        reflectionTimer=reflectionTimer-dt
-        if reflectionTimer<=0 then
-            reflectionTimer=0.1
-            suppressWeatherReflection()
-        end
-    end},
+    engineHandlers={
+        onConsoleCommand=onConsoleCommand,
+        onUpdate=function(dt)
+            reflectionTimer=reflectionTimer-dt
+            if reflectionTimer<=0 then
+                reflectionTimer=0.1
+                suppressWeatherReflection()
+            end
+        end,
+    },
 }
