@@ -97,7 +97,11 @@ local function addOverflow(resource, amount)
     state.idle = 0
 end
 
-local function bufferDamage(resource, incoming)
+-- Reserves up to half of one incoming resource hit and records the exact
+-- Health amount caught on the shared attack payload. Warding Reprisal reads
+-- that value after every calculation has resolved, so unrelated mitigation
+-- cannot be mistaken for Ward absorption.
+local function bufferDamage(resource, incoming, calculationData)
     local state = states[resource]
     SkillDebug.traceEvent("restoration", "Ward damage check", {
         buffer = state.buffer,
@@ -110,6 +114,11 @@ local function bufferDamage(resource, incoming)
     state.buffer = state.buffer - reserved
     if state.drain <= 0 then state.window = inflictionTime() end
     state.drain = state.drain + reserved
+    if resource == "health" and calculationData and type(calculationData.context) == "table" then
+        local attack = calculationData.context
+        attack.skillPerksRestorationWardAbsorbedHealth =
+            (tonumber(attack.skillPerksRestorationWardAbsorbedHealth) or 0) + reserved
+    end
     return incoming - reserved
 end
 
@@ -120,7 +129,7 @@ local function registerBufferCalculation(resource,calculation)
         operation=interfaces.ErnPerkFramework.CALCULATION_OPERATION.Modifier,
         priority=700,
         direction=interfaces.ErnPerkFramework.HIT_DIRECTION.Incoming,
-        handler=function(data) return bufferDamage(resource, data.value) end,
+        handler=function(data) return bufferDamage(resource, data.value, data) end,
     })
 end
 registerBufferCalculation("health",interfaces.ErnPerkFramework.CALCULATION.HIT_DAMAGE_HEALTH)
@@ -369,7 +378,7 @@ local SWAP = {
 interfaces.ErnPerkFramework.registerOnHitHandler({
     id="SkillPerks_restoration_warding_reprise", priority=675,
     direction=interfaces.ErnPerkFramework.HIT_DIRECTION.Incoming,
-    handler=function(attack)
+    handler=function(attack, context)
         SkillDebug.traceEvent("restoration", "Warding Reprisal hit", {
             attacker = attack and SkillDebug.objectId(attack.attacker),
             healthDamage = attack and attack.damage and attack.damage.health,
@@ -393,10 +402,35 @@ interfaces.ErnPerkFramework.registerOnHitHandler({
                 end
             end
         end
-        if rank("D") >= 2 and states.health.drain > 0 then
-            table.insert(reflected,{id="damagehealth",magnitudeMin=math.min(states.health.drain,attack.damage.health or 0),duration=1})
+
+        -- D2 depends on the amount this specific hit adds to the Ward, which
+        -- does not exist until the Health calculation handler has run.
+        local function applyReprisal(resolvedAttack)
+            if not attack.attacker or not attack.attacker:isValid() then
+                return
+            end
+            local absorbed = tonumber(resolvedAttack.skillPerksRestorationWardAbsorbedHealth) or 0
+            if rank("D") >= 2 and absorbed > 0 then
+                table.insert(reflected,{
+                    id="damagehealth",
+                    magnitudeMin=absorbed,
+                    duration=1,
+                })
+            end
+            SkillDebug.traceEvent("restoration", "Warding Reprisal resolved", {
+                absorbedHealth = absorbed,
+                effects = #reflected,
+            })
+            if #reflected > 0 then
+                Common.applyDynamicSpell(attack.attacker,self,"Warding Reprisal",reflected)
+            end
         end
-        Common.applyDynamicSpell(attack.attacker,self,"Warding Reprisal",reflected)
+
+        if context and type(context.afterResolve) == "function" then
+            context.afterResolve(applyReprisal)
+        else
+            applyReprisal(attack)
+        end
     end,
 })
 

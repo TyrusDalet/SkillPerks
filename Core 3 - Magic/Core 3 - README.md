@@ -404,8 +404,8 @@ Universal Antidote uses the following harmful-to-beneficial conversions:
   Poison, Poison as Shock, and resisted Damage, Drain, or Absorb Health as
   Damage Health. The reflected amount is calculated from the damage that the
   player's resistance prevented.
-- Cushioned Vengeance adds direct Damage Health up to the lesser of the Health
-  damage currently dissipating and the incoming hit's Health damage.
+- Cushioned Vengeance adds direct Damage Health equal to the exact amount of
+  that hit newly caught by the Health Ward.
 
 ### Unarmored
 
