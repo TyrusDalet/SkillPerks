@@ -467,7 +467,7 @@ local function getCriticalMultiplier(momentumForCrit, options)
     if overdriveTimer > 0 then
         chance = 0.20
     else
-        local cap = getMomentumCap()
+        local cap = getMomentumCap(momentumKind)
         local stacks = momentumForCrit or momentumStacks
         if cap > 0 and stacks >= cap then
             chance = 0.10
