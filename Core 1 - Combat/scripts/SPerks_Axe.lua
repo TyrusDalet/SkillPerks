@@ -35,6 +35,8 @@ local ui         = require("openmw.ui")
 
 local ChainRequirements = require("scripts.SkillPerks.shared.chain_requirements")
 local CombatMath         = require("scripts.SkillPerks.shared.combat_math")
+local SkillDebug         = require("scripts.SkillPerks.shared.debug")
+local SharedHit          = require("scripts.SkillPerks.shared.hit")
 
 local SKILL_ID = "axe"
 local CALCULATION = interfaces.ErnPerkFramework.CALCULATION
@@ -111,15 +113,18 @@ local DEMORALIZE_RADIUS = 1000 -- 10m in vanilla-scale world units.
 local BERSERK_HEALTH_RATIO = 0.25
 local DAY_SECONDS = 86400
 
-local targetHealthRatioBeforeHit = {}
 local berserkDayUsed = nil
+local lastDemoralizeDebug = nil
+local lastKillCheckDebug = nil
 
 local function getAttackTarget(attack)
     return attack.target or attack.victim or attack.defender
 end
 
 local function isPlayerAxeAttack(attack)
-    if attack.attacker ~= self or not attack.weapon or not types.Weapon.objectIsInstance(attack.weapon) then
+    if not SharedHit.isPlayerAttack(attack, self)
+            or not attack.weapon
+            or not types.Weapon.objectIsInstance(attack.weapon) then
         return false
     end
     return AXE_TYPES[types.Weapon.record(attack.weapon).type] == true
@@ -192,6 +197,12 @@ end
 -- against hits that do not expose a precise armor object.
 local function handleSunderingEdge(attack, target)
     local rank = getARank()
+    SkillDebug.traceEvent(SKILL_ID, "Sundering Edge check", {
+        charged = isChargedAttack(attack),
+        rank = rank,
+        successful = attack.successful,
+        target = SkillDebug.objectId(target),
+    })
     if rank == 0 or attack.successful ~= true or not isChargedAttack(attack) then
         return
     end
@@ -214,14 +225,38 @@ local function handleSunderingEdge(attack, target)
     for _, item in ipairs(pieces) do
         core.sendGlobalEvent("SPerks_DamageItemCondition", { item = item, amount = split })
     end
+    SkillDebug.traceEvent(SKILL_ID, "Sundering Edge applied", {
+        amount = amount,
+        pieces = #pieces,
+    })
 end
 
 -- ============================================================
 --  B CHAIN - TERROR OF THE FALLEN
 -- ============================================================
 
+--- Selects the fear effect appropriate to the nearby actor. Undead use their
+--- dedicated engine effect; ordinary creatures and NPCs use their respective
+--- Demoralize variants.
+--- @param target GameObject Actor receiving Terror of the Fallen.
+--- @return string effectId Engine magic-effect identifier.
+local function getFearEffectId(target)
+    if not types.Creature.objectIsInstance(target) then
+        return "demoralizehumanoid"
+    end
+    if types.Creature.record(target).type == types.Creature.TYPE.Undead then
+        return "turnundead"
+    end
+    return "demoralizecreature"
+end
+
+--- Applies the already-classified fear effect through Core 0's actor-safe
+--- spell bridge and returns its ID for diagnostics.
+--- @param target GameObject Actor receiving the effect.
+--- @param magnitude number Fear magnitude.
+--- @return string effectId Applied engine magic-effect identifier.
 local function applyDemoralize(target, magnitude)
-    local effectId = types.Creature.objectIsInstance(target) and "demoralizecreature" or "demoralizehumanoid"
+    local effectId = getFearEffectId(target)
     core.sendGlobalEvent("SPerks_CreateAndApplySpell", {
         target = target,
         caster = self,
@@ -239,20 +274,61 @@ local function applyDemoralize(target, magnitude)
             quiet = true,
         },
     })
+    return effectId
 end
 
+--- Rolls Terror of the Fallen once for a qualifying Axe kill, then applies
+--- the appropriate fear effect to every nearby actor other than the victim.
+--- The completed roll and delivery counts are retained for `luaaxe debug`.
+--- @param sourceTarget GameObject Actor killed by the Axe hit.
+--- @param chance number Proc chance in the inclusive 0-1 range.
 local function triggerDemoralize(sourceTarget, chance)
     local rank = getBRank()
-    if rank == 0 or math.random() >= chance then
+    if rank == 0 then
         return
     end
 
+    local roll = math.random()
     local magnitude = rank >= 2 and 50 or 20
+    lastDemoralizeDebug = {
+        chance = chance,
+        roll = roll,
+        triggered = roll < chance,
+        magnitude = magnitude,
+        humanoids = 0,
+        creatures = 0,
+        undead = 0,
+    }
+    SkillDebug.traceEvent(SKILL_ID, "Terror roll", {
+        chance = chance,
+        rank = rank,
+        roll = roll,
+        triggered = lastDemoralizeDebug.triggered,
+    })
+    if not lastDemoralizeDebug.triggered then
+        return
+    end
+
     for _, actor in ipairs(nearby.actors) do
-        if actor:isValid() and actor ~= sourceTarget and (actor.position - self.position):length() <= DEMORALIZE_RADIUS then
-            applyDemoralize(actor, magnitude)
+        if actor:isValid()
+                and actor ~= self
+                and actor ~= sourceTarget
+                and (actor.position - self.position):length() <= DEMORALIZE_RADIUS then
+            local effectId = applyDemoralize(actor, magnitude)
+            if effectId == "turnundead" then
+                lastDemoralizeDebug.undead = lastDemoralizeDebug.undead + 1
+            elseif effectId == "demoralizecreature" then
+                lastDemoralizeDebug.creatures = lastDemoralizeDebug.creatures + 1
+            else
+                lastDemoralizeDebug.humanoids = lastDemoralizeDebug.humanoids + 1
+            end
         end
     end
+    SkillDebug.traceEvent(SKILL_ID, "Terror delivered", {
+        creatures = lastDemoralizeDebug.creatures,
+        humanoids = lastDemoralizeDebug.humanoids,
+        undead = lastDemoralizeDebug.undead,
+    })
 end
 
 -- ============================================================
@@ -284,6 +360,11 @@ local function triggerBerserkIfNeeded()
         return
     end
     berserkDayUsed = day
+    SkillDebug.traceEvent(SKILL_ID, "Berserk triggered", {
+        day = day,
+        healthRatio = getHealthRatio(self),
+        rank = rank,
+    })
     ui.showMessage("Berserk fury takes hold!")
 
     local effects = {
@@ -363,6 +444,7 @@ interfaces.ErnPerkFramework.registerCalculationHandler({
     id = ns .. "_axe_broken_plate",
     calculation = CALCULATION.HIT_DAMAGE_HEALTH,
     operation = OPERATION.Addition,
+    direction = interfaces.ErnPerkFramework.HIT_DIRECTION.Outgoing,
 }, function(data)
     local attack = data.context
     if not attack or not isPlayerAxeAttack(attack) then
@@ -384,6 +466,7 @@ interfaces.ErnPerkFramework.registerCalculationHandler({
     calculation = CALCULATION.HIT_DAMAGE_HEALTH,
     operation = OPERATION.Modifier,
     priority = 5000,
+    direction = interfaces.ErnPerkFramework.HIT_DIRECTION.Outgoing,
 }, function(data)
     local attack = data.context
     if not attack or not isPlayerAxeAttack(attack) or getBRank() == 0 then
@@ -394,13 +477,22 @@ interfaces.ErnPerkFramework.registerCalculationHandler({
         return data.value
     end
 
-    local health = types.Actor.stats.dynamic.health(target)
-    if data.value >= health.current then
-        local beforeRatio = targetHealthRatioBeforeHit[target.id] or getHealthRatio(target)
-        targetHealthRatioBeforeHit[target.id] = nil
+    local resources = attack.perkFrameworkPreHitResources
+    local beforeHealth = resources and resources.health or nil
+    local beforeCurrent = beforeHealth and tonumber(beforeHealth.current) or nil
+    local beforeRatio = beforeHealth and tonumber(beforeHealth.ratio) or nil
+    local lethal = beforeCurrent ~= nil and data.value >= beforeCurrent
+    lastKillCheckDebug = {
+        target = target.id,
+        damage = data.value,
+        beforeCurrent = beforeCurrent,
+        beforeRatio = beforeRatio,
+        lethal = lethal,
+        snapshot = beforeHealth ~= nil,
+    }
+    SkillDebug.traceEvent(SKILL_ID, "Terror kill check", lastKillCheckDebug)
+    if lethal then
         triggerDemoralize(target, math.max(0, math.min(1, 0.20 + beforeRatio)))
-    else
-        targetHealthRatioBeforeHit[target.id] = nil
     end
     return data.value
 end)
@@ -411,8 +503,14 @@ end)
 
 interfaces.ErnPerkFramework.registerOnHitHandler({
     id = ns .. "_axe_on_hit",
+    direction = interfaces.ErnPerkFramework.HIT_DIRECTION.Outgoing,
     handler = function(attack)
+        SkillDebug.traceEvent(SKILL_ID, "outgoing hit received", {
+            successful = attack and attack.successful,
+            weapon = attack and SkillDebug.objectId(attack.weapon),
+        })
         if not isPlayerAxeAttack(attack) then
+            SkillDebug.trace(SKILL_ID, "SkillPerks axe [outgoing hit rejected]: not a player Axe attack")
             return
         end
         local target = getAttackTarget(attack)
@@ -420,7 +518,6 @@ interfaces.ErnPerkFramework.registerOnHitHandler({
             return
         end
 
-        targetHealthRatioBeforeHit[target.id] = getHealthRatio(target)
         handleSunderingEdge(attack, target)
     end,
 })
@@ -432,7 +529,6 @@ interfaces.ErnPerkFramework.registerOnHitHandler({
 local function onUpdate()
     refreshBerserkIfNeeded()
     triggerBerserkIfNeeded()
-    targetHealthRatioBeforeHit = {}
 end
 
 local function onSave()
@@ -442,6 +538,54 @@ end
 local function onLoad(data)
     berserkDayUsed = data and data.berserkDayUsed or nil
 end
+
+-- Exposes whether kill tracking and the once-per-day Berserk gate are armed.
+local onConsoleCommand = SkillDebug.makeHandler({
+    name = "Axe",
+    skillId = SKILL_ID,
+    actor = self,
+    ids = ids,
+    commands = { "luaaxe debug" },
+    snapshot = function()
+        local weapon = types.Actor.getEquipment(self, types.Actor.EQUIPMENT_SLOT.CarriedRight)
+        local weaponRecord = weapon and types.Weapon.objectIsInstance(weapon)
+            and types.Weapon.record(weapon) or nil
+        local fear = lastDemoralizeDebug
+        local kill = lastKillCheckDebug
+        return {
+            string.format(
+                "Weapon: id=%s axe=%s",
+                SkillDebug.objectId(weapon),
+                tostring(weaponRecord and AXE_TYPES[weaponRecord.type] == true)
+            ),
+            string.format(
+                "Berserk: usedDay=%s currentDay=%s health(%s)",
+                SkillDebug.value(berserkDayUsed),
+                SkillDebug.value(getCurrentGameDay()),
+                SkillDebug.resourceSummary(self, "health")
+            ),
+            kill and string.format(
+                "Last Axe hit: target=%s preHealth=%s preRatio=%s damage=%s lethal=%s snapshot=%s",
+                SkillDebug.value(kill.target),
+                SkillDebug.value(kill.beforeCurrent),
+                SkillDebug.value(kill.beforeRatio),
+                SkillDebug.number(kill.damage),
+                tostring(kill.lethal),
+                tostring(kill.snapshot)
+            ) or "Last Axe hit: none observed by kill resolver.",
+            fear and string.format(
+                "Terror: triggered=%s roll=%s chance=%s magnitude=%d targets(humanoid/creature/undead)=%d/%d/%d",
+                tostring(fear.triggered),
+                SkillDebug.number(fear.roll),
+                SkillDebug.number(fear.chance),
+                fear.magnitude,
+                fear.humanoids,
+                fear.creatures,
+                fear.undead
+            ) or "Terror: no qualifying Axe kill observed.",
+        }
+    end,
+})
 
 -- ============================================================
 --  PERK REGISTRATIONS
@@ -569,6 +713,7 @@ interfaces.ErnPerkFramework.registerPerk({
 
 return {
     engineHandlers = {
+        onConsoleCommand = onConsoleCommand,
         onUpdate = onUpdate,
         onSave = onSave,
         onLoad = onLoad,

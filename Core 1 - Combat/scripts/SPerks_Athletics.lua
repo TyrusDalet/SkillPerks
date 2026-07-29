@@ -49,6 +49,7 @@ local ui          = require("openmw.ui")
 local StatTracker       = require("scripts.SkillPerks.shared.stat_tracker")
 local ChainRequirements = require("scripts.SkillPerks.shared.chain_requirements")
 local log                = require("scripts.SkillPerks.shared.log")
+local SkillDebug         = require("scripts.SkillPerks.shared.debug")
 
 local SKILL_ID = "athletics"
 
@@ -217,6 +218,12 @@ local function tickFatigueRegen(dt)
         local wholePoints = math.floor(fatigueRegenAccumulator)
         fatigueRegenAccumulator = fatigueRegenAccumulator - wholePoints
         fatigue.current = math.min(fatigue.current + wholePoints, maxFatigue)
+        SkillDebug.traceEvent(SKILL_ID, "fatigue regeneration", {
+            applied = wholePoints,
+            current = fatigue.current,
+            rank = rank,
+            rate = rate,
+        })
     end
 end
 
@@ -421,7 +428,7 @@ local function tickDChain(dt)
             if dStackCount < cap then
                 dStackCount = dStackCount + 1
                 updateDEffects()
-                log(3, "athletics_d_stack", function()
+                SkillDebug.trace(SKILL_ID, function()
                     return "SkillPerks Athletics D: gained momentum stack (" .. dStackCount .. "/" .. cap .. ")"
                 end)
             end
@@ -434,7 +441,7 @@ local function tickDChain(dt)
                 dStoppedTimer = 0
                 dStackCount = 0
                 updateDEffects()
-                log(3, "athletics_d_stack", "SkillPerks Athletics D: momentum lost.")
+                SkillDebug.trace(SKILL_ID, "SkillPerks Athletics D: momentum lost.")
             end
         end
     end
@@ -466,6 +473,7 @@ end
 local function onUiModeChanged(data)
     if data.oldMode == 'Rest' then
         secondWindUsed = false
+        SkillDebug.trace(SKILL_ID, "SkillPerks athletics [rest]: Second Wind reset")
     end
 end
 
@@ -532,10 +540,18 @@ local function consolePrint(message)
 end
 
 local function onConsoleCommand(mode, command)
+    if SkillDebug.handleTraceCommand({
+        name = "Athletics",
+        skillId = SKILL_ID,
+        commands = { "luaathletics debug", "luaath debug" },
+    }, command) then
+        return
+    end
     command = tostring(command or ""):lower():match("^%s*(.-)%s*$")
     if command ~= "luaathletics debug" and command ~= "luaath debug" then
         return
     end
+    SkillDebug.describe({ name = "Athletics", skillId = SKILL_ID, actor = self, ids = ids })
 
     local speed = types.Actor.stats.attributes.speed(self)
     local agility = types.Actor.stats.attributes.agility(self)

@@ -69,6 +69,7 @@ local core       = require("openmw.core")
 
 local ChainRequirements = require("scripts.SkillPerks.shared.chain_requirements")
 local CombatMath         = require("scripts.SkillPerks.shared.combat_math")
+local SkillDebug         = require("scripts.SkillPerks.shared.debug")
 
 -- Reads the framework's cached player perk set for quick rank checks.
 local function hasPerk(id)
@@ -147,6 +148,7 @@ end
 
 local function handleIronGuard()
     local rank = getARank()
+    SkillDebug.traceEvent(SKILL_ID, "Iron Guard check", { rank = rank })
     if rank == 0 then
         return
     end
@@ -162,6 +164,10 @@ local function handleIronGuard()
         item = item,
         before = itemData.condition,
         delay = BLOCK_REFUND_DELAY,
+        reduction = A_REDUCTION[rank],
+    })
+    SkillDebug.traceEvent(SKILL_ID, "Iron Guard queued", {
+        condition = itemData.condition,
         reduction = A_REDUCTION[rank],
     })
 end
@@ -216,6 +222,10 @@ local pendingFatigueSnapshots = {}
 
 local function handlePunishingGuard(attack)
     local rank = getBRank()
+    SkillDebug.traceEvent(SKILL_ID, "Punishing Guard check", {
+        rank = rank,
+        weapon = attack and SkillDebug.objectId(attack.weapon),
+    })
     if rank == 0 then
         return
     end
@@ -384,8 +394,15 @@ end
 -- Registers Block's reactive effects with the framework hit pipeline.
 interfaces.ErnPerkFramework.registerOnHitHandler({
     id = ns .. "_block_on_hit",
+    direction = interfaces.ErnPerkFramework.HIT_DIRECTION.Incoming,
     handler = function(attack)
+        SkillDebug.traceEvent(SKILL_ID, "incoming hit received", {
+            attacker = attack and SkillDebug.objectId(attack.attacker),
+            healthDamage = attack and attack.damage and attack.damage.health,
+            successful = attack and attack.successful,
+        })
         if not isIncomingAttackAgainstPlayer(attack) then
+            SkillDebug.trace(SKILL_ID, "SkillPerks block [incoming hit rejected]: player was not the defender")
             return
         end
 
@@ -396,8 +413,10 @@ interfaces.ErnPerkFramework.registerOnHitHandler({
             blockSuccess = attack.successful == true and attack.damage ~= nil and attack.damage.health == 0
         end
         if not blockSuccess then
+            SkillDebug.trace(SKILL_ID, "SkillPerks block [incoming hit rejected]: attack was not blocked/parried")
             return
         end
+        SkillDebug.trace(SKILL_ID, "SkillPerks block [block accepted]: resolving A/B/C chains")
 
         handleIronGuard()
         handlePunishingGuard(attack)
@@ -436,6 +455,9 @@ local pendingPerfectParry = false
 local pendingPerfectParryTimer = 0
 
 local function onNGardeParrySelf(data)
+    SkillDebug.traceEvent(SKILL_ID, "N'Garde parry event", {
+        perfect = data and data.isPerfect,
+    })
     if data and data.isPerfect then
         pendingPerfectParry = true
         pendingPerfectParryTimer = PERFECT_PARRY_WINDOW
@@ -466,6 +488,11 @@ local function handleIncomingHarmfulSpell(spell)
         success = true
     end
     pendingPerfectParry = false
+    SkillDebug.traceEvent(SKILL_ID, "Spell Guard roll", {
+        rank = rank,
+        spell = spell and spell.id,
+        success = success,
+    })
 
     if not success then
         return
@@ -560,6 +587,40 @@ local function onLoad(data)
     pendingPerfectParry = false
     pendingPerfectParryTimer = 0
 end
+
+-- Reports delayed block work, captured magic, and parry/reflect cooldown state.
+local onConsoleCommand = SkillDebug.makeHandler({
+    name = "Block",
+    skillId = SKILL_ID,
+    actor = self,
+    ids = ids,
+    commands = { "luablock debug" },
+    snapshot = function()
+        local now = core.getSimulationTime()
+        return {
+            string.format(
+                "Integration: NGarde=%s blockingItem=%s",
+                tostring(hasNGarde),
+                SkillDebug.objectId(getBlockingItem())
+            ),
+            string.format(
+                "Queues: conditionRefunds=%d fatigueSnapshots=%d perfectParry=%s timer=%s",
+                #pendingBlockRefunds,
+                #pendingFatigueSnapshots,
+                tostring(pendingPerfectParry),
+                SkillDebug.number(pendingPerfectParryTimer)
+            ),
+            string.format(
+                "Spell guard: captured=%s spell=%s captureCooldown=%s reflectCooldown=%s knownEffects=%d",
+                tostring(spellCaptured),
+                tostring(storedSpellId),
+                SkillDebug.number(math.max(0, (cLastFireTime + (C_COOLDOWN[getCRank()] or 0)) - now)),
+                SkillDebug.number(math.max(0, (dReflectLastTime + D2_REFLECT_COOLDOWN) - now)),
+                SkillDebug.count(knownActiveSpellIds)
+            ),
+        }
+    end,
+})
 
 -- ============================================================
 --  PERK REGISTRATIONS
@@ -702,6 +763,7 @@ return {
         ngarde_parrySelf = onNGardeParrySelf,
     },
     engineHandlers = {
+        onConsoleCommand = onConsoleCommand,
         onUpdate = onUpdate,
         onSave = onSave,
         onLoad = onLoad,

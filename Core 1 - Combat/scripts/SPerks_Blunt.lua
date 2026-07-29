@@ -23,10 +23,10 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
     stamina, crushes through defences." See SkillPerks_Combat.md's Blunt
     Weapon section for the full design spec.
 
-    Blunt is an offensive player-hit file. It deliberately filters for
-    attack.attacker == self, while defensive files such as Block filter the
-    opposite way. Cross-actor writes that cannot safely happen from the
-    player context are routed through Core 0's shared global handlers.
+    Blunt is an offensive player-hit file. Core 0 validates target-local hits
+    and marks forwarded player attacks, while defensive files such as Block
+    subscribe only to incoming hits. Cross-actor writes that cannot safely
+    happen from the player context are routed through Core 0's shared handlers.
 
     CHARGE DETECTION NOTE: the shared design prefers animation text-key
     charge detection, but current hit tables also expose attack.strength in
@@ -40,9 +40,12 @@ local interfaces = require("openmw.interfaces")
 local types      = require("openmw.types")
 local self       = require("openmw.self")
 local core       = require("openmw.core")
+local ui         = require("openmw.ui")
 
 local ChainRequirements = require("scripts.SkillPerks.shared.chain_requirements")
 local CombatMath         = require("scripts.SkillPerks.shared.combat_math")
+local SkillDebug         = require("scripts.SkillPerks.shared.debug")
+local SharedHit          = require("scripts.SkillPerks.shared.hit")
 
 local SKILL_ID = "bluntweapon"
 local CALCULATION = interfaces.ErnPerkFramework.CALCULATION
@@ -106,6 +109,8 @@ local BLUNT_TYPES = {
 }
 
 local CHARGED_THRESHOLD = 0.95
+local lastHitDebug = nil
+local lastCalculationDebug = nil
 
 -- Returns the actor being struck by the player's outgoing hit.
 local function getAttackTarget(attack)
@@ -114,7 +119,7 @@ end
 
 -- True when the hit is a player attack made with a blunt weapon.
 local function isPlayerBluntAttack(attack)
-    if attack.attacker ~= self then
+    if not SharedHit.isPlayerAttack(attack, self) then
         return false
     end
     if not attack.weapon or not types.Weapon.objectIsInstance(attack.weapon) then
@@ -190,18 +195,25 @@ end
 
 local A_FATIGUE_DAMAGE = { [1] = 5, [2] = 10, [3] = 15, [4] = 20 }
 
--- Charged blunt hits deal direct fatigue damage through the target event.
-local function handleHeavyImpact(attack, target)
+-- Charged blunt hits contribute fatigue damage to the shared hit resolution.
+local function handleHeavyImpact(attack)
     local rank = getARank()
+    SkillDebug.traceEvent(SKILL_ID, "Heavy Impact check", {
+        charged = isChargedAttack(attack),
+        rank = rank,
+        successful = attack.successful,
+    })
     if rank == 0 or attack.successful ~= true or not isChargedAttack(attack) then
-        return
+        return 0
     end
-    target:sendEvent("SPerks_TakeFatigue", {
-        amount = A_FATIGUE_DAMAGE[rank],
+    local amount = A_FATIGUE_DAMAGE[rank]
+    interfaces.ErnPerkFramework.addHitDamage(attack, "fatigue", amount, {
         source = self,
         sourceEffect = ids["A" .. tostring(rank)],
         context = "blunt.heavyImpact",
     })
+    SkillDebug.traceEvent(SKILL_ID, "Heavy Impact applied", { fatigueDamage = amount })
+    return amount
 end
 
 -- ============================================================
@@ -264,18 +276,44 @@ interfaces.ErnPerkFramework.registerCalculationHandler({
     id = ns .. "_blunt_hit_damage_health",
     calculation = CALCULATION.HIT_DAMAGE_HEALTH,
     operation = OPERATION.Addition,
+    direction = interfaces.ErnPerkFramework.HIT_DIRECTION.Outgoing,
 }, function(data)
     local attack = data.context
-    if not attack or not isPlayerBluntAttack(attack) then
+    lastCalculationDebug = {
+        direction = data.direction,
+        playerOwned = attack and attack.skillPerksPlayerOwned == true or false,
+        result = "received",
+    }
+    if not attack then
+        lastCalculationDebug.result = "rejected: no attack context"
+        return false
+    end
+    if not isPlayerBluntAttack(attack) then
+        lastCalculationDebug.result = "rejected by player Blunt Weapon check"
         return false
     end
 
     local target = getAttackTarget(attack)
     if not target or not target:isValid() then
+        lastCalculationDebug.result = "rejected: no valid target"
         return false
     end
 
-    local bonus = getExploitationBonus(attack, target) + getCrushingForceBonus(attack, target)
+    local exploitation = getExploitationBonus(attack, target)
+    local crushing = getCrushingForceBonus(attack, target)
+    local bonus = exploitation + crushing
+    lastCalculationDebug = {
+        targetId = target.id,
+        fatigueRatio = getTargetFatigueRatio(target),
+        exploitation = exploitation,
+        crushing = crushing,
+        total = bonus,
+        charged = isChargedAttack(attack),
+        direction = data.direction,
+        playerOwned = attack.skillPerksPlayerOwned == true,
+        result = bonus > 0 and "contributed" or "no B/C contribution",
+    }
+    SkillDebug.traceEvent(SKILL_ID, "damage calculation", lastCalculationDebug)
     if bonus <= 0 then
         return false
     end
@@ -342,7 +380,7 @@ end
 local function handleRelentlessAssault(target)
     local rank = getDRank()
     if rank == 0 then
-        return
+        return 0, false
     end
 
     local key = target.id
@@ -362,7 +400,9 @@ local function handleRelentlessAssault(target)
     if rank >= 2 and entry.stacks >= D_MAX_STACKS[2] then
         removeDStacksForKey(key)
         applyDParalysis(target)
+        return D_MAX_STACKS[2], true
     end
+    return entry.stacks, false
 end
 
 local function tickDStacks(dt)
@@ -400,21 +440,44 @@ end
 
 interfaces.ErnPerkFramework.registerOnHitHandler({
     id = ns .. "_blunt_on_hit",
+    direction = interfaces.ErnPerkFramework.HIT_DIRECTION.Outgoing,
     handler = function(attack)
+        local weapon = attack.weapon
+        local weaponRecord = weapon and types.Weapon.objectIsInstance(weapon)
+            and types.Weapon.record(weapon) or nil
+        lastHitDebug = {
+            source = attack.skillPerksHitSource or "framework",
+            successful = attack.successful,
+            charge = getChargeRatio(attack),
+            charged = isChargedAttack(attack),
+            weaponId = weaponRecord and weaponRecord.id or nil,
+            weaponType = weaponRecord and weaponRecord.type or nil,
+            playerBlunt = isPlayerBluntAttack(attack),
+            targetId = getAttackTarget(attack) and getAttackTarget(attack).id or nil,
+            aFatigueDamage = 0,
+            dStacks = 0,
+            dParalyzed = false,
+        }
         if not isPlayerBluntAttack(attack) then
+            lastHitDebug.result = "rejected by player Blunt Weapon check"
+            SkillDebug.traceEvent(SKILL_ID, "outgoing hit", lastHitDebug)
             return
         end
 
         local target = getAttackTarget(attack)
         if not target or not target:isValid() then
+            lastHitDebug.result = "rejected: no valid target"
+            SkillDebug.traceEvent(SKILL_ID, "outgoing hit", lastHitDebug)
             return
         end
 
-        handleHeavyImpact(attack, target)
+        lastHitDebug.aFatigueDamage = handleHeavyImpact(attack)
 
         if attack.successful == true then
-            handleRelentlessAssault(target)
+            lastHitDebug.dStacks, lastHitDebug.dParalyzed = handleRelentlessAssault(target)
         end
+        lastHitDebug.result = "processed"
+        SkillDebug.traceEvent(SKILL_ID, "outgoing hit", lastHitDebug)
     end,
 })
 
@@ -445,6 +508,69 @@ local function onLoad(data)
                 timer = entry.timer or D_STACK_TIMER,
             }
         end
+    end
+end
+
+local function consolePrint(message)
+    ui.printToConsole(tostring(message), ui.CONSOLE_COLOR.Default)
+end
+
+--- Prints Blunt's live ranks and the last observations from the unified
+--- Framework hit route and arithmetic damage-calculation path.
+local function onConsoleCommand(mode, command)
+    if SkillDebug.handleTraceCommand({
+        name = "Blunt Weapon",
+        skillId = SKILL_ID,
+        commands = { "luablunt debug", "luabl debug" },
+    }, command) then
+        return
+    end
+    command = tostring(command or ""):lower():match("^%s*(.-)%s*$")
+    if command ~= "luablunt debug" and command ~= "luabl debug" then
+        return
+    end
+    SkillDebug.describe({ name = "Blunt Weapon", skillId = SKILL_ID, actor = self, ids = ids })
+
+    local equipped = types.Actor.getEquipment(self, types.Actor.EQUIPMENT_SLOT.CarriedRight)
+    local equippedRecord = equipped and types.Weapon.objectIsInstance(equipped)
+        and types.Weapon.record(equipped) or nil
+    consolePrint("Blunt ranks: A=" .. tostring(getARank())
+        .. " B=" .. tostring(getBRank())
+        .. " C=" .. tostring(getCRank())
+        .. " D=" .. tostring(getDRank())
+        .. " skill=" .. tostring(getBluntSkill())
+        .. " equipped=" .. tostring(equippedRecord and equippedRecord.id)
+        .. " type=" .. tostring(equippedRecord and equippedRecord.type)
+        .. " blunt=" .. tostring(equippedRecord and BLUNT_TYPES[equippedRecord.type] == true))
+
+    if lastHitDebug then
+        consolePrint("Blunt hit: source=" .. tostring(lastHitDebug.source)
+            .. " success=" .. tostring(lastHitDebug.successful)
+            .. " charge=" .. tostring(lastHitDebug.charge)
+            .. " charged=" .. tostring(lastHitDebug.charged)
+            .. " weapon=" .. tostring(lastHitDebug.weaponId)
+            .. " type=" .. tostring(lastHitDebug.weaponType)
+            .. " target=" .. tostring(lastHitDebug.targetId)
+            .. " result=" .. tostring(lastHitDebug.result))
+        consolePrint("Blunt direct procs: A fatigue=" .. tostring(lastHitDebug.aFatigueDamage)
+            .. " D stacks=" .. tostring(lastHitDebug.dStacks)
+            .. " D paralysis=" .. tostring(lastHitDebug.dParalyzed))
+    else
+        consolePrint("Blunt hit: none seen by Framework handler.")
+    end
+
+    if lastCalculationDebug then
+        consolePrint("Blunt damage calculation: result=" .. tostring(lastCalculationDebug.result)
+            .. " direction=" .. tostring(lastCalculationDebug.direction)
+            .. " playerOwned=" .. tostring(lastCalculationDebug.playerOwned)
+            .. " target=" .. tostring(lastCalculationDebug.targetId)
+            .. " fatigue=" .. tostring(lastCalculationDebug.fatigueRatio)
+            .. " B bonus=" .. tostring(lastCalculationDebug.exploitation)
+            .. " C bonus=" .. tostring(lastCalculationDebug.crushing)
+            .. " total=" .. tostring(lastCalculationDebug.total)
+            .. " charged=" .. tostring(lastCalculationDebug.charged))
+    else
+        consolePrint("Blunt damage calculation: none seen.")
     end
 end
 
@@ -583,5 +709,6 @@ return {
         onUpdate = onUpdate,
         onSave = onSave,
         onLoad = onLoad,
+        onConsoleCommand = onConsoleCommand,
     },
 }

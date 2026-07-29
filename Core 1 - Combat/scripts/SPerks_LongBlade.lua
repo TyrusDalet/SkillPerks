@@ -45,7 +45,8 @@ local CombatMath         = require("scripts.SkillPerks.shared.combat_math")
 local StatTracker        = require("scripts.SkillPerks.shared.stat_tracker")
 local LongBladeHud       = require("scripts.SkillPerks.hud.longblade")
 local settings           = require("scripts.SkillPerks.Settings.settings")
-local Log                = require("scripts.SkillPerks.shared.log")
+local SkillDebug         = require("scripts.SkillPerks.shared.debug")
+local SharedHit          = require("scripts.SkillPerks.shared.hit")
 
 settings.registerLongBladeHudSettings()
 
@@ -137,8 +138,6 @@ local overdriveTimer = 0
 local riposteCooldown = 0
 local lastHitDebug = nil
 local reportedPoiseBonus = nil
-local lastOutgoingSignature = nil
-local lastOutgoingSignatureTime = -9999
 
 local poiseTracker = StatTracker.newStatModTracker(self)
 
@@ -205,25 +204,7 @@ local function playCounterAttackAnimation(weapon)
 end
 
 local function isPlayerAttack(attack)
-    if not attack then
-        return false
-    end
-    if attack.attacker == self then
-        return true
-    end
-
-    -- Some outgoing player hit callbacks can arrive without an attacker
-    -- object. Treat those as player-owned only when the hit target is not
-    -- the player and the weapon matches the player's readied weapon.
-    if attack.attacker ~= nil then
-        return false
-    end
-    local target = getAttackTarget(attack)
-    if target == nil or target == self then
-        return false
-    end
-    local weapon = getWeaponFromAttack(attack)
-    return weapon ~= nil and types.Actor.getEquipment(self, types.Actor.EQUIPMENT_SLOT.CarriedRight) == weapon
+    return SharedHit.isPlayerAttack(attack, self)
 end
 
 local function isIncomingAttackAgainstPlayer(attack)
@@ -276,34 +257,6 @@ local function describeAttackForDebug(attack, kind)
         cap = getMomentumCap(kind or momentumKind),
         stacks = momentumStacks,
     }
-end
-
---- Builds a compact signature for de-duping direct and forwarded hit events.
---- @param attack table OpenMW combat hit payload.
---- @return string signature
-local function outgoingHitSignature(attack)
-    local weaponRecord = getWeaponRecord(attack)
-    local target = getAttackTarget(attack)
-    local health = attack.damage and attack.damage.health or nil
-    return tostring(target)
-        .. "|" .. tostring(weaponRecord and weaponRecord.id)
-        .. "|" .. tostring(attack.successful)
-        .. "|" .. tostring(attack.strength)
-        .. "|" .. tostring(health)
-end
-
---- Returns true once for the same outgoing hit arriving through two paths.
---- @param attack table OpenMW combat hit payload.
---- @return boolean duplicate
-local function alreadyHandledOutgoingHit(attack)
-    local now = core.getSimulationTime()
-    local signature = outgoingHitSignature(attack)
-    if signature == lastOutgoingSignature and now - lastOutgoingSignatureTime < 0.25 then
-        return true
-    end
-    lastOutgoingSignature = signature
-    lastOutgoingSignatureTime = now
-    return false
 end
 
 --- Explains why a seen player hit did not grant Momentum.
@@ -606,8 +559,7 @@ local function applyMomentumDamageBonus(attack, kind)
         return criticalLanded
     end
 
-    target:sendEvent("SPerks_TakeDamage", {
-        amount = extraDamage,
+    interfaces.ErnPerkFramework.addHitDamage(attack, "health", extraDamage, {
         source = self,
         sourceEffect = ids.B1,
         context = "longblade.momentum",
@@ -664,6 +616,12 @@ end
 -- Performs the automatic counter-strike as direct target damage. The hit
 -- roll is kept explicit here because Riposte is not a real engine attack.
 local function tryRiposte(attacker, momentumForCrit)
+    SkillDebug.traceEvent(SKILL_ID, "Riposte check", {
+        cooldown = riposteCooldown,
+        dRank = getDRank(),
+        momentum = momentumForCrit,
+        target = SkillDebug.objectId(attacker),
+    })
     if getDRank() == 0 or riposteCooldown > 0 or not attacker or not attacker:isValid() then
         return
     end
@@ -671,6 +629,7 @@ local function tryRiposte(attacker, momentumForCrit)
     local hitChance = math.max(0, math.min(100, CombatMath.getHitChance(self, attacker, SKILL_ID)))
     if math.random(100) > hitChance then
         riposteCooldown = RIPOSTE_COOLDOWN
+        SkillDebug.traceEvent(SKILL_ID, "Riposte missed", { hitChance = hitChance })
         return
     end
 
@@ -700,6 +659,7 @@ local function tryRiposte(attacker, momentumForCrit)
         stacksBefore = momentumForCrit or momentumStacks,
         stacksAfter = momentumStacks,
     }
+    SkillDebug.traceEvent(SKILL_ID, "Riposte landed", lastHitDebug)
     LongBladeHud.forceUpdate(getHudState())
 end
 
@@ -708,9 +668,6 @@ end
 -- ============================================================
 
 local function handleOutgoingPlayerHit(attack, source)
-    if alreadyHandledOutgoingHit(attack) then
-        return
-    end
     local kind = isAllowedMomentumWeapon(attack)
     lastHitDebug = describeAttackForDebug(attack, kind)
     lastHitDebug.source = source or "direct"
@@ -723,13 +680,13 @@ local function handleOutgoingPlayerHit(attack, source)
         maybeStartOverdrive()
         updatePoiseBonus()
         LongBladeHud.forceUpdate(getHudState())
-        Log(3, nil, function()
+        SkillDebug.trace(SKILL_ID, function()
             return "Long Blade Momentum gained via " .. tostring(lastHitDebug.source)
                 .. ": stacks=" .. tostring(momentumStacks)
                 .. " kind=" .. tostring(kind)
         end)
     else
-        Log(3, nil, function()
+        SkillDebug.trace(SKILL_ID, function()
             return "Long Blade Momentum blocked via " .. tostring(lastHitDebug.source)
                 .. ": " .. tostring(blockReason)
                 .. " success=" .. tostring(attack.successful)
@@ -744,7 +701,7 @@ interfaces.ErnPerkFramework.registerOnHitHandler({
     id = ns .. "_longblade_on_hit",
     handler = function(attack)
         if isPlayerAttack(attack) then
-            handleOutgoingPlayerHit(attack, "direct")
+            handleOutgoingPlayerHit(attack, attack.skillPerksHitSource or "framework")
             return
         end
 
@@ -752,6 +709,7 @@ interfaces.ErnPerkFramework.registerOnHitHandler({
             return
         end
         if not attackDealtHealthDamage(attack) then
+            SkillDebug.trace(SKILL_ID, "SkillPerks longblade [incoming hit]: no health damage, Momentum retained")
             return
         end
 
@@ -763,6 +721,11 @@ interfaces.ErnPerkFramework.registerOnHitHandler({
         else
             setMomentum(0)
         end
+        SkillDebug.traceEvent(SKILL_ID, "incoming damage consumed Momentum", {
+            after = momentumStacks,
+            before = momentumBeforeHit,
+            hadPoise = hadPoise,
+        })
         if hadPoise then
             tryRiposte(attack.attacker, momentumBeforeHit)
         end
@@ -770,10 +733,6 @@ interfaces.ErnPerkFramework.registerOnHitHandler({
         LongBladeHud.forceUpdate(getHudState())
     end,
 })
-
-local function onPlayerHitActor(attack)
-    handleOutgoingPlayerHit(attack or {}, "target-bridge")
-end
 
 -- ============================================================
 --  ENGINE CALLBACKS
@@ -828,10 +787,18 @@ local function consolePrint(message)
 end
 
 local function onConsoleCommand(mode, command)
-    command = tostring(command or ""):lower():match("^%s*(.-)%s*$")
-    if command ~= "lualb debug" then
+    if SkillDebug.handleTraceCommand({
+        name = "Long Blade",
+        skillId = SKILL_ID,
+        commands = { "lualb debug", "lualongblade debug" },
+    }, command) then
         return
     end
+    command = tostring(command or ""):lower():match("^%s*(.-)%s*$")
+    if command ~= "lualb debug" and command ~= "lualongblade debug" then
+        return
+    end
+    SkillDebug.describe({ name = "Long Blade", skillId = SKILL_ID, actor = self, ids = ids })
 
     consolePrint("Long Blade Momentum: stacks=" .. tostring(momentumStacks)
         .. " cap=" .. tostring(getMomentumCap(momentumKind))
@@ -997,9 +964,6 @@ return {
     interface = {
         resolveCounterCritical = resolveCounterCritical,
         willAttemptRiposte = willAttemptRiposte,
-    },
-    eventHandlers = {
-        SPerks_PlayerHitActor = onPlayerHitActor,
     },
     engineHandlers = {
         onConsoleCommand = onConsoleCommand,

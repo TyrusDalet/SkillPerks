@@ -31,6 +31,7 @@ local self       = require("openmw.self")
 local StatTracker       = require("scripts.SkillPerks.shared.stat_tracker")
 local ChainRequirements = require("scripts.SkillPerks.shared.chain_requirements")
 local ArmorPoints        = require("scripts.SkillPerks.shared.armor_points")
+local SkillDebug         = require("scripts.SkillPerks.shared.debug")
 
 -- Reads the framework's cached player perk set for quick rank checks.
 local function hasPerk(id)
@@ -94,6 +95,7 @@ end
 
 -- Converts equipped Heavy Armor weight into a Feather effect.
 local function updateAStats()
+    SkillDebug.traceEvent(SKILL_ID, "A-chain refresh", { rank = getARank() })
     local rank = getARank()
     if rank == 0 then
         aTracker.apply("feather", nil, 0)
@@ -130,6 +132,7 @@ end
 
 -- Rebuilds the Fortify Fatigue pool from the number of Heavy Armor pieces worn.
 local function updateBFatiguePool()
+    SkillDebug.traceEvent(SKILL_ID, "B-chain refresh", { rank = getBRank() })
     local rank = getBRank()
     if rank == 0 then
         bTracker.apply("dynamic", "fatigue", 0)
@@ -236,6 +239,7 @@ end
 
 -- Applies the normal-weapon resistance from C1 and C2 as separate contributions.
 local function updateCStats()
+    SkillDebug.traceEvent(SKILL_ID, "C-chain refresh", { rank = getCRank() })
     local rank = getCRank()
     c1Tracker.apply("resistnormalweapons", nil, rank >= 1 and C1_FLAT_RESIST or 0)
 
@@ -309,6 +313,7 @@ end
 
 -- Applies Resist at D1 or Shield at D2 while the full-set gate is satisfied.
 local function updateDStats()
+    SkillDebug.traceEvent(SKILL_ID, "D-chain refresh", { rank = getDRank() })
     local rank = getDRank()
     if rank == 0 or not ArmorPoints.isFullHeavySet(self) then
         for _, elem in ipairs(D_ELEMENTS) do
@@ -385,6 +390,34 @@ local function onLoad(data)
     dTracker.restoreAndReverse(data.dSnapshot)
     clearB2State()
 end
+
+-- Summarizes the equipped Heavy Armor set and the values derived from it.
+local onConsoleCommand = SkillDebug.makeHandler({
+    name = "Heavy Armor",
+    skillId = SKILL_ID,
+    actor = self,
+    ids = ids,
+    commands = { "luaheavyarmor debug", "luaha debug" },
+    snapshot = function()
+        local weight, pieces = getHeavyArmorInfo()
+        local weightedAR = getHeavyArmorRating()
+        return {
+            string.format(
+                "Equipped set: pieces=%s weight=%s weightedAR=%s",
+                SkillDebug.value(pieces),
+                SkillDebug.number(weight),
+                SkillDebug.number(weightedAR)
+            ),
+            string.format(
+                "Combat sampling: attacking=%s swingFatigueBefore=%s jumpPending=%s jumpFatigueBefore=%s",
+                tostring(wasAttacking),
+                SkillDebug.number(fatigueBeforeSwing),
+                tostring(jumpPending),
+                SkillDebug.number(fatigueBeforeJump)
+            ),
+        }
+    end,
+})
 
 -- ============================================================
 --  PERK REGISTRATIONS
@@ -523,6 +556,7 @@ interfaces.ErnPerkFramework.registerPerk({
 
 return {
     engineHandlers = {
+        onConsoleCommand = onConsoleCommand,
         onUpdate = onUpdate,
         onSave = onSave,
         onLoad = onLoad,

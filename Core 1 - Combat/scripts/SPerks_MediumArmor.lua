@@ -36,6 +36,7 @@ local core       = require("openmw.core")
 local StatTracker = require("scripts.SkillPerks.shared.stat_tracker")
 local ChainRequirements = require("scripts.SkillPerks.shared.chain_requirements")
 local ArmorPoints = require("scripts.SkillPerks.shared.armor_points")
+local SkillDebug  = require("scripts.SkillPerks.shared.debug")
 
 -- Reads the framework's cached player perk set for quick rank checks.
 local function hasPerk(id)
@@ -164,6 +165,10 @@ local arTrackerC = StatTracker.newActiveEffectTracker(self)
 
 -- Rebuilds the Shield bonus from the current armor mix and cooldown state.
 local function updateArmorBonus()
+    SkillDebug.traceEvent(SKILL_ID, "armor bonus refresh", {
+        aRank = getARank(),
+        cRank = getCRank(),
+    })
     if cooldownRemaining > 0 then
         arTrackerA.apply("shield", nil, 0)
         arTrackerC.apply("shield", nil, 0)
@@ -304,6 +309,10 @@ end
 
 -- Handles every successful incoming hit that starts or extends the cooldown.
 local function handleHitReceived(attack)
+    SkillDebug.traceEvent(SKILL_ID, "incoming hit received", {
+        damage = attack and attack.damage and attack.damage.health,
+        successful = attack and attack.successful,
+    })
     local wasOnCooldown = cooldownRemaining > 0
 
     if not wasOnCooldown then
@@ -348,6 +357,7 @@ end
 -- Registers Medium Armor's reactive effects with the framework hit pipeline.
 interfaces.ErnPerkFramework.registerOnHitHandler({
     id = ns .. "_mediumarmor_on_hit",
+    direction = interfaces.ErnPerkFramework.HIT_DIRECTION.Incoming,
     handler = function(attack)
         if not anyRankOwned() then
             return
@@ -416,6 +426,38 @@ local function onLoad(data)
     dTriggersUsedThisWindow = 0
     pendingDurabilityRefunds = {}
 end
+
+-- Shows armor coverage plus the hit-response cooldown and durability queue.
+local onConsoleCommand = SkillDebug.makeHandler({
+    name = "Medium Armor",
+    skillId = SKILL_ID,
+    actor = self,
+    ids = ids,
+    commands = { "luamediumarmor debug", "luama debug" },
+    snapshot = function()
+        local totalAR = 0
+        local pieces = 0
+        for _, entry in pairs(getPerPieceAR()) do
+            totalAR = totalAR + (entry.weightedAR or 0)
+            pieces = pieces + 1
+        end
+        return {
+            string.format(
+                "Equipped set: pieces=%s weightedAR=%s",
+                SkillDebug.value(pieces),
+                SkillDebug.number(totalAR)
+            ),
+            string.format(
+                "Hit response: cooldown=%s/%s triggers=%d/%d durabilityRefunds=%d",
+                SkillDebug.number(cooldownRemaining),
+                SkillDebug.number(getBaseCooldown()),
+                dTriggersUsedThisWindow,
+                getDMaxTriggers(),
+                #pendingDurabilityRefunds
+            ),
+        }
+    end,
+})
 
 -- ============================================================
 --  PERK REGISTRATIONS
@@ -557,6 +599,7 @@ interfaces.ErnPerkFramework.registerPerk({
 
 return {
     engineHandlers = {
+        onConsoleCommand = onConsoleCommand,
         onUpdate = onUpdate,
         onSave = onSave,
         onLoad = onLoad,

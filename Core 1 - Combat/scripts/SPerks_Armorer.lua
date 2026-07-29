@@ -33,6 +33,7 @@ local async      = require("openmw.async")
 local ui         = require("openmw.ui")
 
 local ChainRequirements = require("scripts.SkillPerks.shared.chain_requirements")
+local SkillDebug        = require("scripts.SkillPerks.shared.debug")
 
 -- Reads the framework's cached player perk set for quick rank checks.
 local function hasPerk(id)
@@ -179,6 +180,8 @@ local pendingRepairAttempts = {}
 local maintainedToolkitItemId = nil
 local maintainedToolkitRecordId = nil
 local toolkitCreatePending = false
+local toolkitLastGrantDay = nil
+local toolkitClockNeedsBaseline = true
 local repairToolSafetyReserves = {}
 local inventoryExtenderHandlersRegistered = false
 local onRepairUIOpened
@@ -318,9 +321,12 @@ local function removeMaintainedToolkitItem()
     forgetMaintainedToolkitItem()
 end
 
-local function findExistingToolkitItem(recordId)
+-- Returns any perk-granted Armorer tool in the player's inventory. The four
+-- A-chain tools form one shared pool: owning an older tool prevents a newer
+-- rank from preparing another until the existing tool has been spent.
+local function findExistingToolkitItem()
     for _, item in ipairs(types.Actor.inventory(self):getAll()) do
-        if item.recordId == recordId then
+        if isArmorerToolkitRecord(item.recordId) then
             return item
         end
     end
@@ -335,12 +341,24 @@ local function rememberToolkitItem(item)
     maintainedToolkitRecordId = item.recordId
 end
 
--- Maintains exactly one free repair tool granted by the Armorer A-chain.
--- If the player removes the maintained instance from their inventory, it is
--- forgotten and replaced. If their rank improves, the old tool is removed and
--- the stronger record is granted instead.
+-- Returns the current whole in-game day. Game time is monotonic seconds, so
+-- this remains stable across month/year boundaries and advances through rest
+-- and travel without depending on calendar globals.
+local function currentGameDay()
+    return math.floor(core.getGameTime() / (24 * 60 * 60))
+end
+
+-- Grants at most one A-chain tool per in-game day, and only while none of the
+-- four perk tools remains in the player's inventory. Loading establishes a
+-- fresh baseline day, so this polling function cannot create a tool merely
+-- because Lua reloaded or the player changed cell.
 local function maintainArmorerToolkit()
     local rank = getARank()
+    SkillDebug.traceEvent(SKILL_ID, "daily toolkit check", {
+        day = currentGameDay(),
+        pending = toolkitCreatePending,
+        rank = rank,
+    })
     if rank == 0 then
         removeMaintainedToolkitItem()
         toolkitCreatePending = false
@@ -352,26 +370,26 @@ local function maintainArmorerToolkit()
         return
     end
 
-    local maintained = findCarriedItemById(maintainedToolkitItemId)
-    if maintained then
-        if maintained.recordId == desired.recordId then
-            toolkitCreatePending = false
-            return
-        end
-        removeMaintainedToolkitItem()
-    else
-        forgetMaintainedToolkitItem()
+    local day = currentGameDay()
+    if toolkitClockNeedsBaseline then
+        toolkitLastGrantDay = day
+        toolkitClockNeedsBaseline = false
     end
 
-    local existing = findExistingToolkitItem(desired.recordId)
+    local existing = findExistingToolkitItem()
     if existing then
         rememberToolkitItem(existing)
         toolkitCreatePending = false
         return
     end
+    forgetMaintainedToolkitItem()
+
+    if toolkitLastGrantDay == nil or day <= toolkitLastGrantDay then
+        return
+    end
 
     if toolkitCreatePending then
-        existing = findExistingToolkitItem(desired.recordId)
+        existing = findExistingToolkitItem()
         if existing then
             rememberToolkitItem(existing)
             toolkitCreatePending = false
@@ -379,6 +397,7 @@ local function maintainArmorerToolkit()
         return
     end
 
+    toolkitLastGrantDay = day
     toolkitCreatePending = true
     core.sendGlobalEvent("SPerks_DuplicateItem", {
         target = self,
@@ -490,6 +509,10 @@ local function getActiveRepairTool()
 end
 
 local function resolveRepairAttempt(attempt)
+    SkillDebug.traceEvent(SKILL_ID, "repair attempt resolving", {
+        target = attempt and attempt.targetId,
+        tool = attempt and attempt.toolId,
+    })
     removePendingRepairAttempt(attempt)
 
     local tool = findCarriedItemById(attempt.toolId)
@@ -557,6 +580,10 @@ end
 -- repair UI. Resolve A2-A4 from that click instead of relying only on a
 -- later poll of whichever repair tool OpenMW still exposes.
 queueRepairAttempt = function(target)
+    SkillDebug.traceEvent(SKILL_ID, "repair click observed", {
+        rank = getARank(),
+        target = SkillDebug.objectId(target),
+    })
     if getARank() < 1 then
         return
     end
@@ -767,6 +794,10 @@ end
 -- Resting indoors lets the player perform light maintenance on damaged gear.
 local function onRestComplete()
     local rank = getCRank()
+    SkillDebug.traceEvent(SKILL_ID, "rest completed", {
+        interior = self.cell ~= nil and not self.cell.isExterior,
+        rank = rank,
+    })
     if rank == 0 then
         return
     end
@@ -848,6 +879,10 @@ end
 
 -- Temporarily lowers item condition so vanilla repair can push it past base max.
 onRepairUIOpened = function(tool)
+    SkillDebug.traceEvent(SKILL_ID, "repair UI opened", {
+        dRank = getDRank(),
+        tool = SkillDebug.objectId(tool),
+    })
     pendingRepairTargetId = nil
 
     if tool then
@@ -886,6 +921,10 @@ end
 
 -- Restores the temporary subtraction after the player leaves self-repair.
 local function onRepairUIClosed()
+    SkillDebug.traceEvent(SKILL_ID, "repair UI closed", {
+        overRepairSession = dSessionActive,
+        pendingAttempts = #pendingRepairAttempts,
+    })
     pendingRepairTargetId = nil
     clearRepairToolSafetyReserves()
 
@@ -931,7 +970,7 @@ local function onUpdate(dt)
     tickDurableCraft(dt)
 end
 
--- Persists the skill bonus and any temporary over-repair subtraction.
+-- Persists temporary repair state and the daily toolkit allowance.
 local function onSave()
     return {
         dSessionActive = dSessionActive,
@@ -939,15 +978,19 @@ local function onSave()
         repairToolSafetyReserves = copyNumberMap(repairToolSafetyReserves),
         maintainedToolkitItemId = maintainedToolkitItemId,
         maintainedToolkitRecordId = maintainedToolkitRecordId,
+        toolkitLastGrantDay = toolkitLastGrantDay,
     }
 end
 
--- Reverses saved deltas and clears in-progress condition tracking.
+-- Reverses saved deltas, clears in-progress condition tracking, and forces
+-- the next update to baseline the loaded day without granting a tool.
 local function onLoad(data)
     data = data or {}
     maintainedToolkitItemId = data.maintainedToolkitItemId
     maintainedToolkitRecordId = data.maintainedToolkitRecordId
     toolkitCreatePending = false
+    toolkitLastGrantDay = data.toolkitLastGrantDay
+    toolkitClockNeedsBaseline = true
 
     if data.dSessionActive then
         dSessionActive = true
@@ -965,6 +1008,41 @@ local function onLoad(data)
     dSubtractedAmounts = {}
 end
 
+-- Reports both repair-session tracking and the once-per-day toolkit state.
+local onConsoleCommand = SkillDebug.makeHandler({
+    name = "Armorer",
+    skillId = SKILL_ID,
+    actor = self,
+    ids = ids,
+    commands = { "luaarmorer debug", "luaarm debug" },
+    snapshot = function()
+        return {
+            string.format(
+                "Repair UI: active=%s target=%s attempts=%d lastTool=%s condition=%s",
+                tostring(dSessionActive),
+                tostring(pendingRepairTargetId),
+                #pendingRepairAttempts,
+                tostring(lastToolId),
+                SkillDebug.value(lastToolCondition)
+            ),
+            string.format(
+                "Toolkit: item=%s record=%s pending=%s lastGrantDay=%s baselineNeeded=%s",
+                tostring(maintainedToolkitItemId),
+                tostring(maintainedToolkitRecordId),
+                tostring(toolkitCreatePending),
+                SkillDebug.value(toolkitLastGrantDay),
+                tostring(toolkitClockNeedsBaseline)
+            ),
+            string.format(
+                "Protection: safetyReserves=%d overrepairItems=%d InventoryExtender=%s",
+                SkillDebug.count(repairToolSafetyReserves),
+                SkillDebug.count(dSubtractedAmounts),
+                tostring(inventoryExtenderHandlersRegistered)
+            ),
+        }
+    end,
+})
+
 -- ============================================================
 --  PERK REGISTRATIONS
 -- ============================================================
@@ -975,8 +1053,8 @@ interfaces.ErnPerkFramework.registerPerk({
     category = ChainRequirements.category("Combat", "Armorer", 1),
     art = "textures\\levelup\\knight",
     localizedFlavour = "A hammer, a strap, a loose rivet: each has a voice, and your hands have learned to listen.",
-    localizedDescription = "You always keep a spare Repair Tongs ready. If the perk-granted "
-        .. "tool is removed from your inventory, another is prepared.",
+    localizedDescription = "Once per new day, if none of your perk-granted repair tools remain, "
+        .. "you prepare a free Repair Tongs.",
     requirements = ChainRequirements.forSlot(SKILL_ID, ids, "A1"),
     onAdd = noPersistentEffect,
     onRemove = noPersistentEffect,
@@ -988,7 +1066,7 @@ interfaces.ErnPerkFramework.registerPerk({
     category = ChainRequirements.category("Combat", "Armorer", 2),
     art = "textures\\levelup\\knight",
     localizedFlavour = "Even a failed repair leaves evidence behind. A bent plate, a stubborn seam, a lesson worth taking.",
-    localizedDescription = "Your prepared tool improves to a Journeyman Repair Hammer. "
+    localizedDescription = "The next daily tool you prepare improves to a Journeyman Repair Hammer. "
         .. "Failed repairs still restore a small amount of condition to the item you attempted to repair.",
     requirements = ChainRequirements.forSlot(SKILL_ID, ids, "A2"),
     onAdd = noPersistentEffect,
@@ -1001,7 +1079,7 @@ interfaces.ErnPerkFramework.registerPerk({
     category = ChainRequirements.category("Combat", "Armorer", 3),
     art = "textures\\levelup\\knight",
     localizedFlavour = "You no longer strike blindly at the work. If the metal refuses, your tool comes away whole.",
-    localizedDescription = "Your prepared tool improves to a Master's Repair Hammer. "
+    localizedDescription = "The next daily tool you prepare improves to a Master's Repair Hammer. "
         .. "Failed repairs no longer consume durability from your repair tool.",
     requirements = ChainRequirements.forSlot(SKILL_ID, ids, "A3"),
     onAdd = noPersistentEffect,
@@ -1014,7 +1092,7 @@ interfaces.ErnPerkFramework.registerPerk({
     category = ChainRequirements.category("Combat", "Armorer", 4),
     art = "textures\\levelup\\knight",
     localizedFlavour = "Fine tools deserve fine hands. Under your care, a good hammer lasts long past the work that should have spent it.",
-    localizedDescription = "Your prepared tool improves to the Secret Master's Repair Hammer. "
+    localizedDescription = "The next daily tool you prepare improves to the Secret Master's Repair Hammer. "
         .. "Successful repairs have a chance to restore the durability spent by your repair tool once the repair is resolved. "
         .. "This chance scales with the tool's own quality.",
     requirements = ChainRequirements.forSlot(SKILL_ID, ids, "A4"),
@@ -1104,6 +1182,7 @@ return {
     },
     engineHandlers = {
         onInit = ensureInventoryExtenderHandlers,
+        onConsoleCommand = onConsoleCommand,
         onUpdate = onUpdate,
         onSave = onSave,
         onLoad = onLoad,

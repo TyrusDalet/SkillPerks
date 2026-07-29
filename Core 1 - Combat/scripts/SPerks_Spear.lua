@@ -31,6 +31,8 @@ local self       = require("openmw.self")
 local core       = require("openmw.core")
 
 local ChainRequirements = require("scripts.SkillPerks.shared.chain_requirements")
+local SkillDebug        = require("scripts.SkillPerks.shared.debug")
+local SharedHit         = require("scripts.SkillPerks.shared.hit")
 
 local SKILL_ID = "spear"
 local CALCULATION = interfaces.ErnPerkFramework.CALCULATION
@@ -102,7 +104,7 @@ local function getAttackTarget(attack)
 end
 
 local function isPlayerAttack(attack)
-    return attack.attacker == self
+    return SharedHit.isPlayerAttack(attack, self)
 end
 
 local function isPlayerSpearAttack(attack)
@@ -141,6 +143,12 @@ local function modifyAttributeDrain(target, attribute, amount)
 end
 
 local function applyDamageAttribute(target, attribute, magnitude, duration, spellName)
+    SkillDebug.traceEvent(SKILL_ID, "attribute damage applied", {
+        attribute = attribute,
+        duration = duration,
+        magnitude = magnitude,
+        target = SkillDebug.objectId(target),
+    })
     core.sendGlobalEvent("SPerks_CreateAndApplySpell", {
         target = target,
         caster = self,
@@ -162,6 +170,9 @@ local function applyDamageAttribute(target, attribute, magnitude, duration, spel
 end
 
 local function applyParalyze(target)
+    SkillDebug.traceEvent(SKILL_ID, "paralysis applied", {
+        target = SkillDebug.objectId(target),
+    })
     core.sendGlobalEvent("SPerks_CreateAndApplySpell", {
         target = target,
         caster = self,
@@ -216,6 +227,10 @@ end
 -- before new ones are applied.
 local function handlePinningPoint(target)
     local rank = getARank()
+    SkillDebug.traceEvent(SKILL_ID, "Pinning Point check", {
+        rank = rank,
+        target = SkillDebug.objectId(target),
+    })
     if rank == 0 then
         return
     end
@@ -277,6 +292,7 @@ interfaces.ErnPerkFramework.registerCalculationHandler({
     id = ns .. "_spear_hit_damage_health",
     calculation = CALCULATION.HIT_DAMAGE_HEALTH,
     operation = OPERATION.Addition,
+    direction = interfaces.ErnPerkFramework.HIT_DIRECTION.Outgoing,
 }, function(data)
     local attack = data.context
     if not attack or attack.successful ~= true then
@@ -357,6 +373,7 @@ end
 
 interfaces.ErnPerkFramework.registerOnHitHandler({
     id = ns .. "_spear_on_hit",
+    direction = interfaces.ErnPerkFramework.HIT_DIRECTION.Outgoing,
     handler = function(attack)
         if not isPlayerAttack(attack) or attack.successful ~= true then
             return
@@ -428,6 +445,32 @@ local function onLoad(data)
     agilityStacksByTarget = data and data.agilityStacksByTarget or {}
     speedStacksByTarget = data and data.speedStacksByTarget or {}
 end
+
+-- Reports the target-local stack maps used by the Spear A and D chains.
+local onConsoleCommand = SkillDebug.makeHandler({
+    name = "Spear",
+    skillId = SKILL_ID,
+    actor = self,
+    ids = ids,
+    commands = { "luaspear debug" },
+    snapshot = function()
+        local weapon = types.Actor.getEquipment(self, types.Actor.EQUIPMENT_SLOT.CarriedRight)
+        local weaponRecord = weapon and types.Weapon.objectIsInstance(weapon)
+            and types.Weapon.record(weapon) or nil
+        return {
+            string.format(
+                "Weapon: id=%s spear=%s",
+                SkillDebug.objectId(weapon),
+                tostring(weaponRecord and weaponRecord.type == types.Weapon.TYPE.SpearTwoWide)
+            ),
+            string.format(
+                "Tracked targets: agilityStacks=%d speedStacks=%d",
+                SkillDebug.count(agilityStacksByTarget),
+                SkillDebug.count(speedStacksByTarget)
+            ),
+        }
+    end,
+})
 
 -- ============================================================
 --  PERK REGISTRATIONS
@@ -555,6 +598,7 @@ interfaces.ErnPerkFramework.registerPerk({
 
 return {
     engineHandlers = {
+        onConsoleCommand = onConsoleCommand,
         onUpdate = onUpdate,
         onSave = onSave,
         onLoad = onLoad,
