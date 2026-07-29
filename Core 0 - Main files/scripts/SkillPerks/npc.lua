@@ -47,6 +47,7 @@ local pself = require("openmw.self")
 
 local Stagger = require("scripts.SkillPerks.shared.stagger")
 local MagicTarget = require("scripts.SkillPerks.shared.magic_target")
+local SharedHit = require("scripts.SkillPerks.shared.hit")
 
 --- Returns the single-player actor object from the world player list.
 --- Kept as a helper so multiplayer support later has one obvious seam.
@@ -55,35 +56,43 @@ local function getPlayer()
     return nearby.players[1]
 end
 
---- Returns true when the target-local hit payload belongs to the player.
+--- Classifies whether the target-local hit payload belongs to the player.
+--- Stable object ids handle distinct userdata wrappers for the same actor.
 --- @param attack table OpenMW combat hit payload.
 --- @param player GameObject Player actor.
---- @return boolean result
-local function isPlayerOwnedHit(attack, player)
-    if not attack or not player then
-        return false
-    end
-    if attack.attacker == player then
-        return true
-    end
-    if attack.attacker ~= nil or not attack.weapon then
-        return false
-    end
-    return attack.weapon == types.Actor.getEquipment(player, types.Actor.EQUIPMENT_SLOT.CarriedRight)
+--- @return string|nil source Player-attribution route.
+local function playerHitSource(attack, player)
+    return SharedHit.playerAttackSource(attack, player)
 end
 
 --- Sends player-owned hits on this NPC back to the player script.
 --- OpenMW delivers local on-hit callbacks to the actor being hit. Player
 --- perk files need their own player-local state, so target actors act as a
 --- small bridge rather than trying to modify player state from here.
+--- Rejected player-like hits send only a primitive trace event; accepted hits
+--- carry the same trace alongside the normal gameplay payload.
 --- @param attack table OpenMW combat hit payload.
-local function forwardPlayerHit(attack)
+--- @param context table Framework hit context.
+local function forwardPlayerHit(attack, context)
     local player = getPlayer()
-    if not isPlayerOwnedHit(attack, player) then
+    local ownershipSource = playerHitSource(attack, player)
+    local trace = SharedHit.tracePayload(
+        attack,
+        player,
+        pself,
+        "npc",
+        context and context.direction or nil
+    )
+    if not ownershipSource then
+        if player and SharedHit.isPotentialPlayerAttack(attack, player) then
+            player:sendEvent("SPerks_HitBridgeTrace", trace)
+        end
         return
     end
     player:sendEvent("SPerks_PlayerHitActor", {
         attacker = attack.attacker or player,
+        skillPerksPlayerOwned = true,
+        skillPerksOwnershipSource = ownershipSource,
         target = attack.target or attack.victim or attack.defender or pself,
         victim = attack.victim,
         defender = attack.defender,
@@ -96,12 +105,49 @@ local function forwardPlayerHit(attack)
         sourceType = attack.sourceType,
         critical = attack.critical,
         isCritical = attack.isCritical,
+        perkFrameworkPreHitResources = attack.perkFrameworkPreHitResources,
+        skillPerksBridgeTrace = trace,
     })
 end
 
-if interfaces.Combat and interfaces.Combat.addOnHitHandler then
-    interfaces.Combat.addOnHitHandler(forwardPlayerHit)
+local playerHitForwarderRegistered = false
+
+--- Registers the target bridge through PerkFramework's sole engine hit hook.
+--- Local interfaces may attach after this script starts, so onUpdate retries
+--- quietly until the Framework actor interface is available.
+local function ensurePlayerHitForwarder()
+    if playerHitForwarderRegistered then
+        return
+    end
+    local fw = interfaces.ErnPerkFramework
+    if not fw or (type(fw.registerRawOnHitObserver) ~= "function"
+            and type(fw.registerOnHitHandler) ~= "function") then
+        return
+    end
+
+    if type(fw.registerRawOnHitObserver) == "function" then
+        fw.registerRawOnHitObserver({
+            id = "SkillPerks_core0_raw_player_hit",
+            priority = 100,
+        }, function(attack, context)
+            forwardPlayerHit(attack, context)
+        end)
+    else
+        -- Compatibility path for Framework versions predating raw observers.
+        fw.registerOnHitHandler({
+            id = "SkillPerks_core0_forward_player_hit",
+            priority = 9000,
+            direction = fw.HIT_DIRECTION.Any,
+        }, function(attack, context)
+            context.afterResolve(function()
+                forwardPlayerHit(attack, context)
+            end)
+        end)
+    end
+    playerHitForwarderRegistered = true
 end
+
+ensurePlayerHitForwarder()
 
 --- Returns the framework interface after local actor interfaces have attached.
 --- NPC scripts can start before another local script's interface is visible,
@@ -169,6 +215,7 @@ local function takeMagicka(data)
 end
 
 local function onUpdate(dt)
+    ensurePlayerHitForwarder()
     Stagger.checkStaggerState()
     MagicTarget.onUpdate(dt)
 end

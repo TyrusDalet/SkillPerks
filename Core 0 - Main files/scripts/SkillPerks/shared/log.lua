@@ -25,6 +25,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 local settings = require("scripts.SkillPerks.Settings.settings")
 
 local lastLoggedMessageCategory = nil
+local lastLoggedMessage = nil
 
 --- Returns the active debug verbosity.
 --- `enableLogging` is kept as a legacy fallback for existing saves/configs.
@@ -48,9 +49,9 @@ local function normalizeArgs(a, b, c)
     return 1, a, b
 end
 
---- @param category string|nil A dedupe key. Consecutive calls with the same
----   category are silently dropped so one noisy onUpdate loop doesn't spam
----   the console. Pass nil to always print regardless of the last category.
+--- @param category string|nil A dedupe key. Below trace verbosity, only an
+---   immediately repeated identical category/message pair is suppressed.
+---   Trace-level calls always print every observation.
 --- @param message string|fun():string A literal string, or a function
 ---   returning one - use the function form for anything even slightly
 ---   expensive to build, since it's only evaluated when logging is on.
@@ -59,15 +60,21 @@ local function Log(a, b, c)
     if configuredVerbosity() < level then
         return
     end
-    if (category ~= nil) and (lastLoggedMessageCategory == category) then
+    local rendered
+    if type(message) == "function" then
+        rendered = message()
+    else
+        rendered = message
+    end
+    if level < 3
+            and category ~= nil
+            and lastLoggedMessageCategory == category
+            and lastLoggedMessage == rendered then
         return
     end
-    if type(message) == "function" then
-        print(message())
-    else
-        print(message)
-    end
+    print(rendered)
     lastLoggedMessageCategory = category
+    lastLoggedMessage = rendered
 end
 
 return Log

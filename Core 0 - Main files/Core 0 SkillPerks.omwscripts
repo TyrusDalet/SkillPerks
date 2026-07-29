@@ -8,5 +8,6 @@
 GLOBAL:scripts/SkillPerks/global.lua
 MENU:scripts/SkillPerks/Settings/menu_settings.lua
 PLAYER:scripts/SkillPerks/Settings/settings_init.lua
+PLAYER:scripts/SkillPerks/player.lua
 NPC:scripts/SkillPerks/npc.lua
 CREATURE:scripts/SkillPerks/creature.lua

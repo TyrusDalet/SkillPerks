@@ -340,11 +340,34 @@ interfaces.Activation.addHandlerForType(types.Creature, onMagicActorActivated)
 ---     quiet = boolean|nil,
 ---   }|nil,
 --- }
+local function reportSpellApplication(data, result)
+    local recipient = data.resultTarget
+    if recipient == nil or not recipient:isValid() or data.resultEvent == nil then
+        return
+    end
+    recipient:sendEvent(data.resultEvent, result)
+end
+
+--- Creates a dynamic spell, applies its selected effects, and optionally
+--- confirms that the resulting active spell is present on the target.
 local function createAndApplySpell(data)
+    data = data or {}
     if not data.target or not data.target:isValid() then
+        reportSpellApplication(data, {
+            requestId = data.requestId,
+            success = false,
+            stage = "validate-target",
+            error = "target is unavailable",
+        })
         return
     end
     if not data.effects or #data.effects == 0 then
+        reportSpellApplication(data, {
+            requestId = data.requestId,
+            success = false,
+            stage = "validate-effects",
+            error = "no effects supplied",
+        })
         return
     end
 
@@ -373,24 +396,66 @@ local function createAndApplySpell(data)
     -- discharge/application gets its own throwaway record.
     local draftId = "SPerks_Dynamic_" .. tostring(core.getSimulationTime()) .. "_" .. tostring(math.random(1, 999999))
 
-    local draft = core.magic.spells.createRecordDraft({
+    local draftOk, draft = pcall(core.magic.spells.createRecordDraft, {
         id = draftId,
         name = data.spellName or "SkillPerks Effect",
         type = core.magic.SPELL_TYPE.Spell,
+        cost = 0,
+        isAutocalc = false,
+        alwaysSucceedFlag = true,
         effects = draftEffects,
     })
-    local newSpell = world.createRecord(draft)
+    if not draftOk then
+        reportSpellApplication(data, {
+            requestId = data.requestId,
+            success = false,
+            stage = "create-draft",
+            error = tostring(draft),
+        })
+        return
+    end
+
+    local recordOk, newSpell = pcall(world.createRecord, draft)
+    if not recordOk or newSpell == nil or newSpell.id == nil then
+        reportSpellApplication(data, {
+            requestId = data.requestId,
+            success = false,
+            stage = "create-record",
+            error = recordOk and "world.createRecord returned no spell id" or tostring(newSpell),
+        })
+        return
+    end
 
     local addOptions = data.activeSpellOptions or {}
-    types.Actor.activeSpells(data.target):add({
-        id = newSpell.id,
-        effects = effectIndices,
-        caster = data.caster,
-        ignoreReflect = addOptions.ignoreReflect,
-        ignoreResistances = addOptions.ignoreResistances,
-        ignoreSpellAbsorption = addOptions.ignoreSpellAbsorption,
-        stackable = addOptions.stackable,
-        quiet = addOptions.quiet,
+    local activeSpells = types.Actor.activeSpells(data.target)
+    local addOk, addError = pcall(function()
+        activeSpells:add({
+            id = newSpell.id,
+            effects = effectIndices,
+            caster = data.caster,
+            ignoreReflect = addOptions.ignoreReflect,
+            ignoreResistances = addOptions.ignoreResistances,
+            ignoreSpellAbsorption = addOptions.ignoreSpellAbsorption,
+            stackable = addOptions.stackable,
+            quiet = addOptions.quiet,
+        })
+    end)
+    local activeOk, active = pcall(function()
+        return activeSpells:isSpellActive(newSpell.id)
+    end)
+    local success = addOk and activeOk and active == true
+    reportSpellApplication(data, {
+        requestId = data.requestId,
+        target = data.target,
+        targetId = data.target.id,
+        spellId = newSpell.id,
+        spellName = data.spellName,
+        effectId = data.effects[1] and data.effects[1].id or nil,
+        success = success,
+        active = activeOk and active or false,
+        stage = success and "active" or (addOk and "verify-active" or "add-active-spell"),
+        error = not addOk and tostring(addError)
+            or (not activeOk and tostring(active) or nil),
     })
 end
 
