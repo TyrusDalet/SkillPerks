@@ -219,7 +219,7 @@ local function attemptBareHandLock(data)
         player = self,
         target = data.target,
         success = success,
-        weakenBy = success and rank >= 2 and security / 2 or 0,
+        weakenFraction = not success and rank >= 2 and 0.25 or 0,
     })
     ui.showMessage(success and "The lock yields to your bare hands."
         or "The lock resists your touch.")
@@ -330,7 +330,7 @@ Common.registerStealthPerks(SKILL_ID, "Security", ids, {
     C1 = { localizedName = "Trap Mastery", localizedFlavour = "A trap is only a threat until you learn where its patience ends.", localizedDescription = "Probe condition loss on a failed disarm is reduced by 50%. Successful disarms have a 25% chance to preserve the use.", onRemove = clearSecurity },
     C2 = { localizedName = "Wire-Seer", localizedFlavour = "You read pressure, spring, and poison as if the trap wrote them down for you.", localizedDescription = "Trap Mastery's successful-disarm preservation chance rises to 50%.", onRemove = clearSecurity },
     D1 = { localizedName = "Master Locksmith", localizedFlavour = "Tools help. Mastery begins when the lock fears your empty hand.", localizedDescription = "Once per rest, activating a lock with an empty right hand attempts to open it using a normal Security roll with tool quality 1. Failure has no penalty.", onRemove = clearSecurity },
-    D2 = { localizedName = "Hands Like Keys", localizedFlavour = "Some locks open because metal meets metal. Others open because you have learned their name.", localizedDescription = "Master Locksmith can be attempted twice per rest. Success also permanently weakens the lock by half your Security skill.", onRemove = clearSecurity },
+    D2 = { localizedName = "Hands Like Keys", localizedFlavour = "Some locks open because metal meets metal. Others open because you have learned their name.", localizedDescription = "Master Locksmith can be attempted twice per rest. A failed attempt permanently reduces the lock's level by 25%.", onRemove = clearSecurity },
 })
 
 return {

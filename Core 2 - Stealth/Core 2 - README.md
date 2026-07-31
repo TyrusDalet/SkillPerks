@@ -134,8 +134,8 @@ Load those dependencies before `Core 2 SkillPerks.omwscripts`.
 - **C2 - Wire-Seer:** Successful-disarm preservation rises to 50%.
 - **D1 - Master Locksmith:** Once per rest, activating a lock with an empty
   right hand attempts a normal Security roll at tool quality 1.
-- **D2 - Hands Like Keys:** Allows two attempts per rest; success permanently
-  weakens the lock by half your Security skill.
+- **D2 - Hands Like Keys:** Allows two attempts per rest; a failed attempt
+  permanently reduces the lock's level by 25%.
 
 ### Short Blade
 
@@ -300,8 +300,8 @@ the helmet, each pauldron, each gauntlet, and boots are worth 1 each.
   `Security + Agility / 5 + Luck / 10`, modified by current Fatigue and reduced
   by the lock level. Attempting consumes one of the perk's uses even on
   failure; resting restores the allowance.
-- Hands Like Keys reduces the lock level by half the player's modified
-  Security on success, in addition to opening it.
+- Hands Like Keys leaves a failed lock closed but permanently reduces its
+  current lock level by 25%. Successful checks simply open the lock.
 
 ### Short Blade Details
 
