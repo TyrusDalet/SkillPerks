@@ -25,9 +25,12 @@ local types = require("openmw.types")
 local ui = require("openmw.ui")
 
 local Log = require("scripts.SkillPerks.shared.log")
+local settings = require("scripts.SkillPerks.Settings.settings")
 
 local Debug = {}
 local traceSection = storage.playerSection("SkillPerksDebugTrace")
+local traceSequences = {}
+local tracedStates = {}
 
 pcall(function()
     traceSection:setLifeTime(storage.LIFE_TIME.GameSession)
@@ -46,6 +49,15 @@ end
 --- @return boolean
 function Debug.isTraceEnabled(skillId)
     return traceSection:get(traceKey(skillId)) == true
+end
+
+--- Returns whether the configured verbosity can currently emit this level.
+--- @param level number
+--- @return boolean
+function Debug.isVerbosityEnabled(level)
+    local verbosity=tonumber(settings.debugVerbosity) or 0
+    if verbosity<=0 and settings.enableLogging then verbosity=1 end
+    return verbosity >= (tonumber(level) or 1)
 end
 
 --- Reports whether any skill currently needs Core 0 boundary diagnostics.
@@ -87,6 +99,157 @@ function Debug.trace(skillId, message)
     Log(3, nil, message)
 end
 
+--- Formats trace fields in stable key order so separate runs are easy to compare.
+--- Small arrays and keyed tables are expanded instead of printing Lua addresses.
+--- @param value any
+--- @param depth number|nil
+--- @return string
+local function traceValue(value, depth)
+    depth = depth or 0
+    if type(value) ~= "table" then
+        return Debug.value(value)
+    end
+    if depth >= 2 then
+        return "<table>"
+    end
+
+    local keys = {}
+    for key in pairs(value) do
+        keys[#keys + 1] = key
+    end
+    table.sort(keys, function(left, right)
+        return tostring(left) < tostring(right)
+    end)
+
+    local parts = {}
+    for _, key in ipairs(keys) do
+        parts[#parts + 1] = tostring(key) .. "=" .. traceValue(value[key], depth + 1)
+    end
+    return "{" .. table.concat(parts, ",") .. "}"
+end
+
+--- Renders a trace field table without depending on insertion order.
+--- @param fields table|nil
+--- @return string
+local function traceFields(fields)
+    local keys = {}
+    for key in pairs(fields or {}) do
+        keys[#keys + 1] = key
+    end
+    table.sort(keys, function(left, right)
+        return tostring(left) < tostring(right)
+    end)
+
+    local parts = {}
+    for _, key in ipairs(keys) do
+        parts[#parts + 1] = tostring(key) .. "=" .. traceValue(fields[key])
+    end
+    return table.concat(parts, " ")
+end
+
+--- Starts one correlated level-3 trace for a perk activation or state change.
+--- The returned object is deliberately safe to call when tracing is disabled.
+--- Use `gate` for every early-return condition, `step` for calculations or
+--- deliveries, and exactly one of `finish` or `reject` for the final outcome.
+--- @param skillId any
+--- @param effectName string
+--- @param trigger string
+--- @param fields table|nil
+--- @return table
+function Debug.beginTrace(skillId, effectName, trigger, fields)
+    local key = traceKey(skillId)
+    local enabled = Debug.isTraceEnabled(key) and Debug.isVerbosityEnabled(3)
+    if enabled then traceSequences[key] = (traceSequences[key] or 0) + 1 end
+
+    local session = {
+        enabled = enabled,
+        skillId = key,
+        effectName = tostring(effectName or "unknown effect"),
+        id = traceSequences[key] or 0,
+        stepNumber = 0,
+        closed = false,
+    }
+
+    --- Emits one ordered stage in this activation.
+    --- @param status string
+    --- @param label string
+    --- @param stageFields table|nil
+    local function emit(status, label, stageFields)
+        if not session.enabled then return end
+        session.stepNumber = session.stepNumber + 1
+        Debug.trace(key, function()
+            local values = traceFields(stageFields)
+            local suffix = values ~= "" and (" | " .. values) or ""
+            return string.format(
+                "SkillPerks %s TRACE #%d %s %02d %s [%s]%s",
+                key,
+                session.id,
+                session.effectName,
+                session.stepNumber,
+                status,
+                tostring(label),
+                suffix
+            )
+        end)
+    end
+
+    --- Records an intermediate observation or completed calculation.
+    function session:step(label, stageFields)
+        if self.closed then return end
+        emit("STEP", label, stageFields)
+    end
+
+    --- Records a condition and returns it, allowing concise guarded returns.
+    function session:gate(label, passed, stageFields)
+        if self.closed then return passed == true end
+        emit(passed and "PASS" or "FAIL", label, stageFields)
+        return passed == true
+    end
+
+    --- Ends an activation that deliberately did no work.
+    function session:reject(reason, stageFields)
+        if self.closed then return false end
+        emit("REJECT", reason, stageFields)
+        self.closed = true
+        return false
+    end
+
+    --- Ends an activation after its output has been delivered or queued.
+    function session:finish(result, stageFields)
+        if self.closed then return true end
+        emit("DONE", result, stageFields)
+        self.closed = true
+        return true
+    end
+
+    emit("BEGIN", trigger or "triggered", fields)
+    return session
+end
+
+--- Emits a correlated trace only when a polled/passive state actually changes.
+--- This preserves complete recalculation evidence without repeating the same
+--- values five times per second while the player remains idle.
+--- @param skillId any
+--- @param effectName string
+--- @param stateKey string
+--- @param fields table|nil
+--- @return boolean changed
+function Debug.traceState(skillId, effectName, stateKey, fields)
+    if not Debug.isTraceEnabled(skillId) or not Debug.isVerbosityEnabled(3) then
+        return false
+    end
+    local skillKey = traceKey(skillId)
+    tracedStates[skillKey] = tracedStates[skillKey] or {}
+    local fingerprint = traceFields(fields)
+    if tracedStates[skillKey][stateKey] == fingerprint then
+        return false
+    end
+    tracedStates[skillKey][stateKey] = fingerprint
+    local trace = Debug.beginTrace(skillId, effectName, "polled state changed", fields)
+    trace:finish("state reconciled")
+    return true
+end
+
 --- Emits a compact, stable key/value trace for one observed activation.
 --- @param skillId any
 --- @param label string
@@ -115,8 +278,14 @@ end
 function Debug.wrapCallback(skillId, label, callback)
     callback = callback or function() end
     return function(...)
-        Debug.trace(skillId, "SkillPerks " .. tostring(skillId) .. ": " .. tostring(label))
-        return callback(...)
+        local trace=Debug.beginTrace(
+            skillId,
+            tostring(label),
+            "perk lifecycle callback"
+        )
+        local result=callback(...)
+        trace:finish("callback completed")
+        return result
     end
 end
 
@@ -298,9 +467,22 @@ function Debug.handleTraceCommand(config, command)
     local normalized = tostring(command or ""):lower():match("^%s*(.-)%s*$")
     for _, candidate in ipairs(config.commands or {}) do
         local traceCommand = tostring(candidate):lower() .. " trace"
-        if normalized == traceCommand then
+        local requested = normalized:match("^" .. traceCommand:gsub("([^%w])", "%%%1") .. "%s*(.-)%s*$")
+        if requested ~= nil then
             local skillId = config.traceId or config.skillId
-            local enabled = not Debug.isTraceEnabled(skillId)
+            local enabled
+            if requested == "on" then
+                enabled = true
+            elseif requested == "off" then
+                enabled = false
+            elseif requested == "status" then
+                enabled = Debug.isTraceEnabled(skillId)
+            elseif requested == "" then
+                enabled = not Debug.isTraceEnabled(skillId)
+            else
+                Debug.print("Trace usage: " .. tostring(candidate) .. " trace [on|off|status]")
+                return true
+            end
             Debug.setTraceEnabled(skillId, enabled)
             Debug.print(string.format(
                 "%s live trace %s. Trace output requires SkillPerks verbosity 3.",

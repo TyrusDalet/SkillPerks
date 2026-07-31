@@ -7,7 +7,7 @@ perkVisibilityModeDescription: "Controls which SkillPerks appear in the perk men
 enableLoggingName: "Verbose Logging"
 enableLoggingDescription: "Print detailed debug information to the console. Intended for testing, not normal play."
 debugVerbosityName: "Debug Verbosity"
-debugVerbosityDescription: "Controls SkillPerks debug logging.\n0) Off\n1) Important state changes only\n2) Detailed perk effect logs\n3) Trace-level calculation and polling logs"
+debugVerbosityDescription: "Controls SkillPerks debug logging.\n0) Off\n1) Important state changes and failures\n2) Detailed perk decisions\n3) Full step-by-step traces for skills enabled with their debug trace command"
 longBladeHudSettings: "Long Blade HUD"
 longBladeHudEnableName: "Show Long Blade HUD"
 longBladeHudEnableDescription: "Show a small Morrowind-style Momentum widget when Long Blade Momentum perks are available."

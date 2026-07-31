@@ -79,14 +79,22 @@ SkillPerks debug output is controlled from its settings page:
 - `0 - Off`: no diagnostic logging.
 - `1 - Important`: major state changes and failures.
 - `2 - Detailed`: perk decisions and useful testing state.
-- `3 - Trace`: the most detailed diagnostic output for bug reports.
+- `3 - Trace`: full, ordered perk execution traces for explicitly selected
+  skills.
 
 Normal player-facing perk notifications are independent of debug verbosity.
 
-Every skill debug command also accepts a trailing `trace`. For example,
-`luah2h debug trace` toggles live Hand-to-Hand activation and rejection
-logging. These per-skill traces only print while verbosity is set to `3`, and
-the same command turns that skill's trace off again.
+Every skill debug command also accepts `trace`, `trace on`, `trace off`, or
+`trace status`. For example, `luah2h debug trace on` enables live
+Hand-to-Hand diagnostics. These per-skill traces only print while verbosity is
+set to `3`.
+
+A level-3 trace follows one activation through ordered stages. It records the
+trigger, every eligibility gate and rejection reason, input values, arithmetic,
+random rolls, queued output, target-local processing, and global dynamic-spell
+application acknowledgement where those stages apply. Passive and polled perks
+report only when their calculated state changes, preventing identical
+frame-by-frame noise.
 
 ## Shared Console Commands
 
@@ -103,8 +111,11 @@ by some OpenMW console configurations is ignored.
 
 ## Optional Compatibility
 
-Spell Framework Plus and N'Garde are supported but are not required. Install
-them only if you want their own features.
+Spell Framework Plus, Spellforge, and N'Garde are supported but are not
+required. Spellforge spells cast by the player use the same Magic-perk source
+rules as ordinary and custom spells; abilities, enchanted items, scrolls, and
+scripted secondary effects remain excluded unless a perk explicitly permits
+them. Install these optional mods only if you want their own features.
 
 ## Credits
 

@@ -102,9 +102,25 @@ local types = require("openmw.types")
 -- to Master Locksmith instead.
 local securityMasteryRanks = {}
 local spellforgeCastWindows = {}
+local spellforgeCleanupTimer = 0
 
 local function playerKey(player)
     return player and tostring(player.id) or nil
+end
+
+--- Builds a per-caster, per-target launch key. Spellforge may apply one
+--- helper record to several actors, so spell ID alone cannot safely pair SFP
+--- hit and effect lifecycle events.
+local function spellforgeWindowKey(caster,target,spellId)
+    return table.concat({
+        tostring(caster and caster.id or ""),
+        tostring(target and target.id or ""),
+        tostring(spellId or ""),
+    },"\0")
+end
+
+local function sameObject(left,right)
+    return left~=nil and right~=nil and tostring(left.id)==tostring(right.id)
 end
 
 --- Returns a castable spell record while excluding abilities and enchantments.
@@ -128,21 +144,34 @@ end
 local function relaySpellforgeMagicHit(data)
     data = data or {}
     local actor = data.actor or data.target
+    local caster = data.attacker
     local userData = data.userData
     if type(userData) ~= "table" or userData.spellforge ~= true
             or not actor or not actor:isValid()
-            or not types.Player.objectIsInstance(actor)
-            or data.attacker ~= actor
+            or not types.Actor.objectIsInstance(actor)
+            or not caster or not caster:isValid()
+            or not types.Player.objectIsInstance(caster)
             or not castableSpellRecord(data.spellId) then
         return
     end
 
+    local expiresAt=core.getSimulationTime()+1
+    local key=spellforgeWindowKey(caster,actor,data.spellId)
+    spellforgeCastWindows[key]=expiresAt
+    actor:sendEvent("SPerks_AuthorizeSpellforgeSpell",{
+        caster=caster,
+        expiresAt=expiresAt,
+        spellId=data.spellId,
+    })
+
+    -- Restoration needs a pre-application resource snapshot for instant
+    -- self-heals. Other self effects use the shared authorization above.
+    if not sameObject(actor,caster) then return end
     local health = types.Actor.stats.dynamic.health(actor)
     local fatigue = types.Actor.stats.dynamic.fatigue(actor)
-    local key = playerKey(actor) .. "\0" .. tostring(data.spellId)
-    spellforgeCastWindows[key] = core.getSimulationTime() + 1
-    actor:sendEvent("SPerks_SpellforgeMagicHit", {
+    caster:sendEvent("SPerks_SpellforgeMagicHit", {
         spellId = data.spellId,
+        target = actor,
         healthMissing = math.max(0, health.base + health.modifier - health.current),
         fatigueMissing = math.max(0, fatigue.base + fatigue.modifier - fatigue.current),
     })
@@ -155,27 +184,41 @@ local function relaySpellforgeEffectApplied(data)
     data = data or {}
     local actor = data.actor
     local effect = data.effect or {}
+    local caster = effect.caster
     if not actor or not actor:isValid()
-            or not types.Player.objectIsInstance(actor)
-            or effect.caster ~= actor
+            or not types.Actor.objectIsInstance(actor)
+            or not caster or not caster:isValid()
+            or not types.Player.objectIsInstance(caster)
             or not castableSpellRecord(effect.spellId) then
         return
     end
 
-    local key = playerKey(actor) .. "\0" .. tostring(effect.spellId)
+    local key=spellforgeWindowKey(caster,actor,effect.spellId)
     local expires = spellforgeCastWindows[key]
     if not expires or expires < core.getSimulationTime() then
         spellforgeCastWindows[key] = nil
         return
     end
 
-    actor:sendEvent("SPerks_SpellforgeEffectApplied", {
+    if not sameObject(actor,caster) then return end
+    caster:sendEvent("SPerks_SpellforgeEffectApplied", {
         spellId = effect.spellId,
+        target = actor,
         effectId = effect.id,
         magnitude = effect.magnitude,
         duration = effect.duration,
         index = effect.index,
     })
+end
+
+local function onUpdate(dt)
+    spellforgeCleanupTimer=spellforgeCleanupTimer-dt
+    if spellforgeCleanupTimer>0 then return end
+    spellforgeCleanupTimer=2
+    local now=core.getSimulationTime()
+    for key,expiresAt in pairs(spellforgeCastWindows) do
+        if expiresAt<now then spellforgeCastWindows[key]=nil end
+    end
 end
 
 --- Records whether a player currently owns Master Locksmith.
@@ -347,11 +390,81 @@ local function reportSpellApplication(data, result)
     if recipient == nil or not recipient:isValid() or data.resultEvent == nil then
         return
     end
+    result.traceSkill = data.traceSkill
+    result.traceEffect = data.traceEffect
     recipient:sendEvent(data.resultEvent, result)
 end
 
+--- Returns the gameplay identity of one spell effect without including its
+--- magnitude or duration. Reapplying the same perk effect with different
+--- numbers is still the same effect for non-stacking purposes.
+--- @param effect table Spell-record or active-spell effect.
+--- @return string identity
+local function dynamicEffectIdentity(effect)
+    return table.concat({
+        tostring(effect and effect.id or ""):lower(),
+        tostring(effect and effect.affectedAttribute or ""):lower(),
+        tostring(effect and effect.affectedSkill or ""):lower(),
+    }, "|")
+end
+
+--- Produces an order-independent signature for a dynamic spell's effects.
+--- This lets one named perk spell carry different attribute or skill effects
+--- simultaneously while preventing a duplicate of the same effect set.
+--- @param effects table Effect list.
+--- @return string signature
+local function dynamicEffectSignature(effects)
+    local identities = {}
+    for _, effect in pairs(effects or {}) do
+        identities[#identities + 1] = dynamicEffectIdentity(effect)
+    end
+    table.sort(identities)
+    return table.concat(identities, ";")
+end
+
+--- Compares optional caster handles across local/global script boundaries.
+--- OpenMW can expose different userdata wrappers for the same actor, while
+--- the GameObject id remains stable.
+--- @param left GameObject|nil First caster.
+--- @param right GameObject|nil Second caster.
+--- @return boolean same
+local function sameOptionalCaster(left, right)
+    if left == nil or right == nil then
+        return left == nil and right == nil
+    end
+    if left == right then
+        return true
+    end
+    local leftOk, leftId = pcall(function() return left.id end)
+    local rightOk, rightId = pcall(function() return right.id end)
+    return leftOk and rightOk and leftId ~= nil and leftId == rightId
+end
+
+--- Finds an already-running SkillPerks dynamic spell with the same display
+--- name, effect identities, and caster. Dynamic records otherwise receive a
+--- unique record id, which defeats OpenMW's normal stackable=false safeguard.
+--- @param activeSpells ActorActiveSpells Target's active-spell collection.
+--- @param data table Dynamic spell request.
+--- @return table|nil activeSpell Existing matching spell.
+local function matchingDynamicSpell(activeSpells, data)
+    local requestedName = tostring(data.spellName or "SkillPerks Effect")
+    local requestedSignature = dynamicEffectSignature(data.effects)
+    for _, spell in pairs(activeSpells) do
+        local recordId = tostring(spell.id or ""):lower()
+        if recordId:find("^sperks_dynamic_", 1, false)
+                and tostring(spell.name or "") == requestedName
+                and dynamicEffectSignature(spell.effects) == requestedSignature
+                and sameOptionalCaster(spell.caster, data.caster) then
+            return spell
+        end
+    end
+    return nil
+end
+
 --- Creates a dynamic spell, applies its selected effects, and optionally
---- confirms that the resulting active spell is present on the target.
+--- confirms that the resulting active spell is present on the target. Perk
+--- spells do not stack by default; callers must explicitly set stackable=true
+--- when overlapping instances are part of the perk's stated design.
 local function createAndApplySpell(data)
     data = data or {}
     if not data.target or not data.target:isValid() then
@@ -390,6 +503,27 @@ local function createAndApplySpell(data)
                 active = true,
                 skipped = true,
                 stage = "effect-already-active",
+            })
+            return
+        end
+    end
+
+    local addOptions = data.activeSpellOptions or {}
+    local activeSpells = types.Actor.activeSpells(data.target)
+    if addOptions.stackable ~= true then
+        local existing = matchingDynamicSpell(activeSpells, data)
+        if existing ~= nil then
+            reportSpellApplication(data, {
+                requestId = data.requestId,
+                target = data.target,
+                targetId = data.target.id,
+                spellId = existing.id,
+                spellName = data.spellName,
+                effectId = data.effects[1] and data.effects[1].id or nil,
+                success = false,
+                active = true,
+                skipped = true,
+                stage = "dynamic-spell-already-active",
             })
             return
         end
@@ -450,8 +584,6 @@ local function createAndApplySpell(data)
         return
     end
 
-    local addOptions = data.activeSpellOptions or {}
-    local activeSpells = types.Actor.activeSpells(data.target)
     local addOk, addError = pcall(function()
         activeSpells:add({
             id = newSpell.id,
@@ -648,5 +780,8 @@ return {
             data.spellId = data.spellId or data.id
             applyExistingSpell(data)
         end,
+    },
+    engineHandlers = {
+        onUpdate=onUpdate,
     },
 }

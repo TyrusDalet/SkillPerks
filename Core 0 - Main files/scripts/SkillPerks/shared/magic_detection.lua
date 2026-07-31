@@ -86,8 +86,15 @@ function MagicDetection.isPlayerCastActiveSpell(actor, activeSpell)
     end
     local record = spellRecord(activeSpell.id)
     if not MagicDetection.isCastableSpellRecord(record) then return false end
+    local shared=interfaces.SkillPerksMagic
+    local authorized=false
+    if shared and type(shared.isSpellforgeSpellAuthorized)=="function" then
+        local ok,result=pcall(shared.isSpellforgeSpellAuthorized,record.id)
+        authorized=ok and result==true
+    end
     return types.Actor.spells(actor)[record.id] ~= nil
         or MagicDetection.isSpellforgeRecord(record)
+        or authorized
 end
 
 --- Describes every field used by the shared source decision. This keeps
@@ -96,6 +103,13 @@ function MagicDetection.describeActiveSpellSource(actor, activeSpell)
     local record = activeSpell and spellRecord(activeSpell.id) or nil
     local known = actor ~= nil and record ~= nil
         and types.Actor.spells(actor)[record.id] ~= nil or false
+    local shared=interfaces.SkillPerksMagic
+    local authorized=false
+    if shared and type(shared.isSpellforgeSpellAuthorized)=="function"
+            and record then
+        local ok,result=pcall(shared.isSpellforgeSpellAuthorized,record.id)
+        authorized=ok and result==true
+    end
     return {
         id = activeSpell and activeSpell.id or nil,
         name = activeSpell and activeSpell.name or nil,
@@ -108,6 +122,7 @@ function MagicDetection.describeActiveSpellSource(actor, activeSpell)
         recordName = record and record.name or nil,
         known = known,
         spellforge = MagicDetection.isSpellforgeRecord(record),
+        spellforgeAuthorized = authorized,
         qualifies = MagicDetection.isPlayerCastActiveSpell(actor, activeSpell),
     }
 end

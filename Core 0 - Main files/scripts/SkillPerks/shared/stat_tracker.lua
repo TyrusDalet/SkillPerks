@@ -39,17 +39,21 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
       newActiveEffectTracker(actor)
         For types.Actor.activeEffects(actor):modify(delta, effectId, extraParam).
-        Used by anything applying Fortify/Resist/Sanctuary/Chameleon/etc.
-        as an ACTIVE EFFECT rather than a base stat write - i.e. anything
-        that should show up as a labelled entry in the active-effects list,
-        not just quietly move a number.
+        Used by Resist/Sanctuary/Chameleon/etc. and by deliberate magical
+        effects that should appear in the active-effects list. Flat perk-owned
+        maximum Health, Magicka, and Fatigue bonuses must not use this tracker:
+        an engine Fortify effect can raise the displayed pool without raising
+        the natural regeneration ceiling.
 
       newStatModTracker(actor)
         For direct stat.modifier writes on attributes, skills, and dynamic
         stats (health/magicka/fatigue). Used for the "Fortify Health via
         stat.modifier so the maximum is raised correctly" pattern used
         throughout FactionPerks, and for the flat attribute/skill grants
-        every A-chain in Combat/Stealth/Magic hands out.
+        every A-chain in Combat/Stealth/Magic hands out. This is also the
+        required path for temporary perk-owned dynamic-stat caps; the owning
+        perk should apply and clear its tracked modifier as the condition
+        starts and ends.
 
     BOTH trackers work the same way: apply(key, newValue) sets the TOTAL
     value this tracker is currently responsible for at that key, and

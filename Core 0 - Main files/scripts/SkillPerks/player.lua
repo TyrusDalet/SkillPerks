@@ -33,6 +33,8 @@ Log(3, nil, "SkillPerks Core 0 hit diagnostics loaded (raw bridge trace v2).")
 local RESOURCE_DELTA_EVENT = "ErnPerkFramework_ApplyActorResourceDelta"
 local RESOURCE_RESULT_EVENT = "SPerks_HitResolutionApplied"
 local resourceRequestSerial = 0
+local spellforgeAuthorizations = {}
+local spellforgeCleanupTimer = 0
 
 local HIT_TRACE_SKILLS = {
     "acrobatics",
@@ -241,9 +243,116 @@ local function onHitBridgeTrace(trace)
     publishBridgeTrace("target-rejected", trace)
 end
 
+--- Relays target-local Magic decisions into the owning skill's gated trace.
+--- Target scripts cannot print selectively for the player's chosen school,
+--- so they send compact primitive payloads here and Core 0 applies the same
+--- verbosity-3 plus `debug trace` gate as player-side perk code.
+--- @param data table|nil
+local function onMagicTargetTrace(data)
+    data = data or {}
+    SkillDebug.traceEvent(
+        data.skillId or "magic",
+        "TARGET " .. tostring(data.effectName or "Magic") .. " / "
+            .. tostring(data.stage or "step"),
+        data.fields
+    )
+end
+
+--- Reports the global dynamic-spell service's final application result.
+--- This closes the diagnostic gap between a school queuing an effect and
+--- OpenMW confirming that the generated ActiveSpell exists on its target.
+--- @param data table|nil
+local function onMagicSpellApplicationResult(data)
+    data = data or {}
+    SkillDebug.traceEvent(
+        data.traceSkill or "magic",
+        "GLOBAL " .. tostring(data.traceEffect or data.spellName or "dynamic spell")
+            .. " / " .. tostring(data.stage or "unknown"),
+        {
+            active=data.active,effect=data.effectId,error=data.error,
+            requestId=data.requestId,skipped=data.skipped,spell=data.spellId,
+            success=data.success,target=data.targetId,
+        }
+    )
+end
+
+--- Retains authoritative Spellforge self-cast authorization long enough for
+--- all Magic school scripts to classify the resulting ActiveSpell. The
+--- global bridge has already excluded abilities, items, and non-player casts.
+local function authorizeSpellforgeSelfEffect(data)
+    data=data or {}
+    local target=data.target
+    if target and tostring(target.id)~=tostring(self.id) then return end
+    local spellId=tostring(data.spellId or ""):lower()
+    if spellId=="" then return end
+    local duration=math.max(0,tonumber(data.duration) or 0)
+    local expiresAt=core.getSimulationTime()+math.max(1,duration+0.5)
+    spellforgeAuthorizations[spellId]=math.max(
+        spellforgeAuthorizations[spellId] or 0,
+        expiresAt
+    )
+end
+
+local function clearExpiredSpellforgeAuthorizations()
+    local now=core.getSimulationTime()
+    for spellId,expiresAt in pairs(spellforgeAuthorizations) do
+        if expiresAt<now then spellforgeAuthorizations[spellId]=nil end
+    end
+end
+
+--- Returns whether Core 0 observed an authenticated Spellforge self-cast for
+--- this generated helper record and its authorization remains live.
+local function isSpellforgeSpellAuthorized(spellId)
+    clearExpiredSpellforgeAuthorizations()
+    return (spellforgeAuthorizations[tostring(spellId or ""):lower()] or 0)
+        >= core.getSimulationTime()
+end
+
+local function onUpdate(dt)
+    spellforgeCleanupTimer=spellforgeCleanupTimer-dt
+    if spellforgeCleanupTimer>0 then return end
+    spellforgeCleanupTimer=0.5
+    clearExpiredSpellforgeAuthorizations()
+end
+
+local function onSave()
+    local now=core.getSimulationTime()
+    local saved={}
+    for spellId,expiresAt in pairs(spellforgeAuthorizations) do
+        local remaining=expiresAt-now
+        if remaining>0 then saved[spellId]=remaining end
+    end
+    return {spellforgeAuthorizations=saved}
+end
+
+local function onLoad(data)
+    local now=core.getSimulationTime()
+    spellforgeAuthorizations={}
+    for spellId,remaining in pairs(
+            data and data.spellforgeAuthorizations or {}) do
+        remaining=math.max(0,tonumber(remaining) or 0)
+        if remaining>0 then
+            spellforgeAuthorizations[spellId]=now+remaining
+        end
+    end
+end
+
 return {
+    interfaceName = "SkillPerksMagic",
+    interface = {
+        isSpellforgeSpellAuthorized = isSpellforgeSpellAuthorized,
+    },
     eventHandlers = {
         SPerks_PlayerHitActor = onPlayerHitActor,
         SPerks_HitBridgeTrace = onHitBridgeTrace,
+        SPerks_MagicTargetTrace = onMagicTargetTrace,
+        SPerks_MagicSpellApplicationResult = onMagicSpellApplicationResult,
+        SPerks_SpellforgeMagicHit = authorizeSpellforgeSelfEffect,
+        SPerks_SpellforgeEffectApplied = authorizeSpellforgeSelfEffect,
+    },
+    engineHandlers = {
+        onLoad=onLoad,
+        onSave=onSave,
+        onUpdate=onUpdate,
     },
 }

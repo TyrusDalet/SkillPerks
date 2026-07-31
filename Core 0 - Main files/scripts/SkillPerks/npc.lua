@@ -170,7 +170,8 @@ local function takeDamage(data)
     if fw == nil then
         return
     end
-    fw.applyActorResourceDelta({
+    local before=types.Actor.stats.dynamic.health(pself).current
+    local resolved=fw.applyActorResourceDelta({
         actor = pself,
         resource = "health",
         operation = fw.RESOURCE_OPERATION.Damage,
@@ -180,6 +181,7 @@ local function takeDamage(data)
         damageType = data.damageType,
         context = data,
     })
+    MagicTarget.reportResourceDelta(data,"health",resolved,before)
 end
 
 --- Applies direct fatigue damage to self through the framework resource
@@ -192,7 +194,8 @@ local function takeFatigue(data)
     if fw == nil then
         return
     end
-    fw.applyActorResourceDelta({
+    local before=types.Actor.stats.dynamic.fatigue(pself).current
+    local resolved=fw.applyActorResourceDelta({
         actor = pself,
         resource = "fatigue",
         operation = fw.RESOURCE_OPERATION.Damage,
@@ -202,6 +205,7 @@ local function takeFatigue(data)
         damageType = data.damageType,
         context = data,
     })
+    MagicTarget.reportResourceDelta(data,"fatigue",resolved,before)
 end
 
 --- Applies direct Magicka damage through the shared resource pipeline.
@@ -209,13 +213,15 @@ local function takeMagicka(data)
     data = data or {}
     local fw = framework()
     if fw == nil then return end
-    fw.applyActorResourceDelta({
+    local before=types.Actor.stats.dynamic.magicka(pself).current
+    local resolved=fw.applyActorResourceDelta({
         actor = pself, resource = "magicka",
         operation = fw.RESOURCE_OPERATION.Damage,
         amount = data.amount or 0, source = data.source,
         sourceEffect = data.sourceEffect, damageType = data.damageType,
         context = data,
     })
+    MagicTarget.reportResourceDelta(data,"magicka",resolved,before)
 end
 
 local function onUpdate(dt)
