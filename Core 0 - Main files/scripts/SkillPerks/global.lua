@@ -73,8 +73,8 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
     Security activation bridge
         Records exact lock/trap targets for the player Security script and
         synchronously intercepts Master Locksmith's empty-hand activation.
-        Successful rolls return here to weaken, unlock, and activate the
-        object in the context where those writes are legal.
+        Rolls return here to weaken a lock after a D2 failure or to unlock and
+        activate it after a success, in the context where those writes are legal.
 
     Dialogue and merchant bridge
         Relays Inventory Extender's actor-specific UI lifecycle to SkillPerks
@@ -268,9 +268,9 @@ local function onSecurityLockableActivated(target, actor)
     return false
 end
 
--- Completes a successful bare-hand attempt in global context. D2's lock
--- damage is represented by lowering the retained lock level before unlocking;
--- that matters if another script later relocks the same object.
+-- Resolves the result in global context, where lock state can be changed.
+-- Success opens the lock; a D2 failure leaves it locked but permanently lowers
+-- its level by 25%, giving the player's next attempt an easier mechanism.
 local function resolveSecurityBareHandAttempt(data)
     data = data or {}
     local target = data.target
@@ -281,13 +281,18 @@ local function resolveSecurityBareHandAttempt(data)
     end
 
     if data.success then
+        types.Lockable.unlock(target)
+        world._runStandardActivationAction(target, player)
+        return
+    end
+
+    local weakenFraction = math.max(0, math.min(1, tonumber(data.weakenFraction) or 0))
+    if weakenFraction > 0 and types.Lockable.isLocked(target) then
         local currentLevel = types.Lockable.getLockLevel(target)
-        local weakenedLevel = math.max(1, currentLevel - math.max(0, data.weakenBy or 0))
+        local weakenedLevel = math.max(1, math.floor(currentLevel * (1 - weakenFraction) + 0.5))
         if weakenedLevel < currentLevel then
             types.Lockable.lock(target, weakenedLevel)
         end
-        types.Lockable.unlock(target)
-        world._runStandardActivationAction(target, player)
     end
 end
 
