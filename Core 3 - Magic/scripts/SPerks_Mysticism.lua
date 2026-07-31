@@ -53,6 +53,9 @@ local function deficientEquipped()
 end
 
 local function distributeCharge(amount)
+    local trace=SkillDebug.beginTrace("mysticism","Echo of the Soul","charge distribution",{
+        requested=amount,
+    })
     local granted = 0
     for _, entry in ipairs(deficientEquipped()) do
         if amount <= 0 then break end
@@ -60,66 +63,102 @@ local function distributeCharge(amount)
         local itemData = types.Item.itemData(entry.item)
         itemData.enchantmentCharge = entry.current + add
         amount, granted = amount - add, granted + add
+        trace:step("item charged",{
+            amount=add,item=SkillDebug.objectId(entry.item),
+            newCharge=entry.current+add,remaining=amount,
+        })
     end
+    if granted<=0 then trace:reject("no deficient equipped enchanted item")
+    else trace:finish("charge distributed",{granted=granted,unused=amount}) end
     return granted
 end
 
 local function onSpellLanded(data)
-    SkillDebug.traceEvent("mysticism", "spell landed", {
+    local trace=SkillDebug.beginTrace("mysticism","Soultrap perks","landed magic-effect event",{
         spell = data and data.spellId,
         target = data and SkillDebug.objectId(data.target),
     })
-    if not data or not data.target or not data.target:isValid()
-            or not Common.isPlayerCastLandedSpell(data) then return end
+    if not data or not data.target or not data.target:isValid() then
+        return trace:reject("target is missing or unavailable")
+    end
+    if not Common.isPlayerCastLandedSpell(data) then
+        return trace:reject("source is not an allowed player-cast spell")
+    end
     local soultrap
     for _, effect in ipairs(data.effects or {}) do
         if effect.id == "soultrap" then soultrap = effect break end
     end
-    if not soultrap then return end
+    if not soultrap then return trace:reject("landed spell contains no Soultrap effect") end
 
     local value = soulValue(data.target)
     local a = rank("A")
     local key = tostring(data.target)
     if a > 0 and not echoedTargets[key] then
         local rate = ({ 0.05, 0.10, 0.15, 0.25 })[a]
-        if distributeCharge(math.floor(value * rate)) > 0 then
+        local requested=math.floor(value * rate)
+        trace:step("Echo of the Soul calculated",{
+            aRank=a,rate=rate,requestedCharge=requested,soulValue=value,
+        })
+        local granted=distributeCharge(requested)
+        if granted > 0 then
             echoedTargets[key] = true
             data.target:sendEvent("SPerks_MysticismConfirmEcho", { caster=self })
+            trace:step("Echo of the Soul confirmed",{granted=granted,targetKey=key})
+        else
+            trace:step("Echo of the Soul produced no charge",{requested=requested})
         end
+    elseif a == 0 then
+        trace:step("Echo of the Soul skipped",{reason="A chain inactive"})
+    else
+        trace:step("Echo of the Soul skipped",{reason="target already echoed",targetKey=key})
     end
 
     local b = rank("B")
     if b > 0 then
         local duration = math.max(1, tonumber(soultrap.durationLeft or soultrap.duration) or 1)
-        Common.applyDynamicSpell(data.target, self, "Soul Tether", {{
-            id="absorbmagicka", magnitudeMin=b, duration=duration,
-        }}, { ignoreReflect=true, ignoreResistances=true, ignoreSpellAbsorption=true })
+        -- The target owns the authoritative non-stacking gate. It sends an
+        -- acceptance event back only when no live tether exists; applying the
+        -- Absorb spell before that acknowledgement allowed repeated Soultraps
+        -- to queue multiple global spell requests.
         data.target:sendEvent("SPerks_MysticismSetTether", {
             caster=self, soulValue=value, burst=b >= 2,
+            duration=duration, magnitude=b,
             expiresAt=core.getSimulationTime() + duration,
         })
+        trace:step("Soul Tether acceptance requested",{
+            bRank=b,burst=b>=2,duration=duration,magnitude=b,soulValue=value,
+        })
+    else
+        trace:step("Soul Tether skipped",{reason="B chain inactive"})
     end
+    trace:finish("Soultrap perk processing complete",{aRank=a,bRank=b})
 end
 
 local function onActorActivated(data)
     local d = rank("D")
     local target = data and data.target
-    SkillDebug.traceEvent("mysticism", "actor activated", {
+    local trace=SkillDebug.beginTrace("mysticism","Telekinetic Force","actor activated",{
         dRank = d,
         target = SkillDebug.objectId(target),
     })
-    if d == 0 or not target or not target:isValid()
-            or Common.playerSpellEffectMagnitude(self, "telekinesis") <= 0 then return end
+    if d == 0 then return trace:reject("D chain inactive") end
+    if not target or not target:isValid() then return trace:reject("target unavailable") end
+    local telekinesis=Common.playerSpellEffectMagnitude(self, "telekinesis")
+    if telekinesis <= 0 then
+        return trace:reject("no qualifying player-cast Telekinesis",{magnitude=telekinesis})
+    end
     local hostile = true
     if types.NPC.objectIsInstance(target) then
         local fight = types.Actor.stats.ai.fight(target)
         hostile = fight and fight.modified >= 50
     end
-    if not hostile then return end
+    if not hostile then return trace:reject("target is not hostile") end
     local cost = d == 2 and 15 or 25
     local magicka = types.Actor.stats.dynamic.magicka(self)
-    if magicka.current < cost then return end
-    interfaces.ErnPerkFramework.applyActorResourceDelta({
+    if magicka.current < cost then
+        return trace:reject("insufficient Magicka",{cost=cost,current=magicka.current})
+    end
+    local resolved=interfaces.ErnPerkFramework.applyActorResourceDelta({
         actor=self,resource="magicka",
         operation=interfaces.ErnPerkFramework.RESOURCE_OPERATION.Damage,
         amount=cost,source=self,sourceEffect=ids["D"..d],
@@ -127,9 +166,15 @@ local function onActorActivated(data)
     })
     local mysticism = types.NPC.stats.skills.mysticism(self).modified
     local willpower = types.Actor.stats.attributes.willpower(self).modified
-    target:sendEvent("SPerks_MysticismStaggerAttempt", {
-        drainAmount=math.ceil(mysticism / 2 + willpower / 10), isD2=d >= 2,
+    local drain=math.ceil(mysticism / 2 + willpower / 10)
+    trace:step("force calculated",{
+        costRequested=cost,costResolved=resolved,drainAmount=drain,
+        mysticism=mysticism,willpower=willpower,
     })
+    target:sendEvent("SPerks_MysticismStaggerAttempt", {
+        caster=self,drainAmount=drain, isD2=d >= 2,
+    })
+    trace:finish("stagger attempt delivered",{knockdownCheck=d>=2})
 end
 
 local function refreshHungrySoul()
@@ -138,6 +183,9 @@ local function refreshHungrySoul()
     local ratio = Common.dynamicRatio(self, "magicka")
     local amount = ratio < 0.5 and cap * (1 - ratio / 0.5) or 0
     effects.apply("spellabsorption", nil, amount)
+    SkillDebug.traceState("mysticism","Hungry Soul","passive",{
+        absorption=amount,cRank=c,magickaRatio=ratio,maximum=cap,
+    })
 end
 
 local function clear()
@@ -171,7 +219,7 @@ Common.registerMagicPerks("mysticism", "Mysticism", ids, {
     A2={localizedName="Resonant Capture",localizedFlavour="The captive spirit rings through every prepared vessel you carry.",localizedDescription="Echo of the Soul converts 10%.",onRemove=clear},
     A3={localizedName="Deep Resonance",localizedFlavour="You hear power in the instant between possession and imprisonment.",localizedDescription="Echo of the Soul converts 15%.",onRemove=clear},
     A4={localizedName="Perfect Soul Circuit",localizedFlavour="No captured essence crosses your grasp without leaving power behind.",localizedDescription="Echo of the Soul converts 25%.",onRemove=clear},
-    B1={localizedName="Soul Tether",localizedFlavour="Once hooked, the spirit pays a slow toll for every second it resists.",localizedDescription="Soultrap also applies 1 point per second Absorb Magicka for its duration.",onRemove=clear},
+    B1={localizedName="Soul Tether",localizedFlavour="Once hooked, the spirit pays a slow toll for every second it resists.",localizedDescription="Soultrap also applies a non-stacking 1 point per second Absorb Magicka for its duration. Recasting Soultrap does not refresh it.",onRemove=clear},
     B2={localizedName="Final Dividend",localizedFlavour="When the tether snaps in death, its last recoil floods back into you.",localizedDescription="Soul Tether rises to 2 points per second; death during it restores 20% of the target's soul value as Magicka.",onRemove=clear},
     C1={localizedName="Hungry Soul",localizedFlavour="An empty reserve is not weakness. It is an invitation hostile magic cannot refuse.",localizedDescription="Below 50% Magicka, gain scaling Spell Absorption up to 25%.",onAdd=refreshHungrySoul,onRemove=clear},
     C2={localizedName="Abyssal Appetite",localizedFlavour="The less power remains yours, the more eagerly your soul devours another's.",localizedDescription="Hungry Soul's cap increases to 50%.",onAdd=refreshHungrySoul,onRemove=clear},
@@ -183,6 +231,35 @@ return {
     eventHandlers = {
         SPerks_MagicEffectLanded = onSpellLanded,
         SPerks_MagicActorActivated = onActorActivated,
+        SPerks_MysticismTetherAccepted = function(data)
+            local trace=SkillDebug.beginTrace(
+                "mysticism",
+                "Soul Tether",
+                "target accepted tether",
+                {
+                    duration=data and data.duration,
+                    magnitude=data and data.magnitude,
+                    target=data and SkillDebug.objectId(data.target),
+                }
+            )
+            if not data or not data.target or not data.target:isValid() then
+                return trace:reject("accepted tether target is unavailable")
+            end
+            local magnitude=math.max(1,tonumber(data.magnitude) or 1)
+            local duration=math.max(1,tonumber(data.duration) or 1)
+            local queued=Common.applyDynamicSpell(data.target,self,"Soul Tether",{{
+                id="absorbmagicka",magnitudeMin=magnitude,duration=duration,
+            }},{
+                ignoreReflect=true,
+                ignoreResistances=true,
+                ignoreSpellAbsorption=true,
+                stackable=false,
+            })
+            trace:finish(queued and "single Absorb Magicka spell queued"
+                or "dynamic spell request rejected",{
+                    duration=duration,magnitude=magnitude,
+                })
+        end,
         SPerks_MysticismSoulTetherBurst = function(data)
             Common.restoreResource(self, "magicka", data and data.amount or 0, ids.B2)
         end,

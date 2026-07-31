@@ -17,6 +17,7 @@ local MagicConstellations = require("scripts.SkillPerks.constellations.magic")
 local MagicDetection = require("scripts.SkillPerks.shared.magic_detection")
 
 local Common = {}
+local dynamicSpellRequestSerial = 0
 local SLOT_ORDER = { "A1", "A2", "A3", "A4", "B1", "B2", "C1", "C2", "D1", "D2" }
 local SLOT_MENU_ORDER = {
     A1 = 1, A2 = 2, A3 = 3, A4 = 4,
@@ -123,15 +124,40 @@ end
 
 function Common.applyDynamicSpell(target, caster, name, effects, options)
     if not target or not target:isValid() or not effects or #effects == 0 then
-        return
+        return false
     end
+    options = options or {}
+    local traceSkill = options.traceSkill
+    if traceSkill == nil then
+        local normalized=tostring(name or ""):lower()
+        if normalized:find("alchemical",1,true) or normalized:find("raw ingestion",1,true) then traceSkill="alchemy"
+        elseif normalized:find("burden",1,true) or normalized:find("kinetic",1,true) then traceSkill="alteration"
+        elseif normalized:find("servant",1,true) then traceSkill="conjuration"
+        elseif normalized:find("enchant",1,true) then traceSkill="enchant"
+        elseif normalized:find("devotion",1,true) then traceSkill="illusion"
+        elseif normalized:find("tether",1,true) then traceSkill="mysticism"
+        elseif normalized:find("element",1,true) or normalized:find("drain mastery",1,true)
+                or normalized:find("frozen finish",1,true) then traceSkill="destruction"
+        elseif normalized:find("reprisal",1,true) then traceSkill="restoration" end
+    end
+    dynamicSpellRequestSerial=dynamicSpellRequestSerial+1
+    local requestId="SkillPerks_MagicSpell_"..tostring(dynamicSpellRequestSerial)
+    local traced=traceSkill~=nil
+        and SkillDebug.isTraceEnabled(traceSkill)
+        and SkillDebug.isVerbosityEnabled(3)
     core.sendGlobalEvent("SPerks_CreateAndApplySpell", {
         target = target,
         caster = caster,
         spellName = name,
         effects = effects,
         activeSpellOptions = options,
+        requestId = requestId,
+        resultTarget = traced and caster or nil,
+        resultEvent = traced and "SPerks_MagicSpellApplicationResult" or nil,
+        traceSkill = traceSkill,
+        traceEffect = name,
     })
+    return true
 end
 
 function Common.effectIndexList(spell, predicate)

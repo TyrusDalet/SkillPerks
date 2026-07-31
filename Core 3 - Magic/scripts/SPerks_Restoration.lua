@@ -84,17 +84,24 @@ end
 local function addOverflow(resource, amount)
     local state = states[resource]
     local allowed = cap(resource)
-    SkillDebug.traceEvent("restoration", "Ward overflow check", {
+    local trace=SkillDebug.beginTrace("restoration","Ward of Delay","restore overflow observed",{
         amount = amount,
+        bufferBefore=state.buffer,
         cap = allowed,
+        drainBefore=state.drain,
         resource = resource,
     })
-    if allowed <= 0 or amount <= 0 then return end
+    if allowed <= 0 then return trace:reject("resource has no active Ward capacity") end
+    if amount <= 0 then return trace:reject("restore produced no overflow") end
     local cancel = math.min(state.drain, amount)
     state.drain = state.drain - cancel
     amount = amount - cancel
     state.buffer = math.min(allowed, state.buffer + amount)
     state.idle = 0
+    trace:finish("overflow stored",{
+        bufferAfter=state.buffer,cancelledDrain=cancel,drainAfter=state.drain,
+        overflowStored=amount,
+    })
 end
 
 -- Reserves up to half of one incoming resource hit and records the exact
@@ -103,12 +110,15 @@ end
 -- cannot be mistaken for Ward absorption.
 local function bufferDamage(resource, incoming, calculationData)
     local state = states[resource]
-    SkillDebug.traceEvent("restoration", "Ward damage check", {
+    local trace=SkillDebug.beginTrace("restoration","Ward of Delay","incoming damage calculation",{
         buffer = state.buffer,
+        cap=cap(resource),
         incoming = incoming,
         resource = resource,
     })
-    if incoming <= 0 or state.buffer <= 0 or cap(resource) <= 0 then return incoming end
+    if incoming <= 0 then trace:reject("incoming damage is zero") return incoming end
+    if state.buffer <= 0 then trace:reject("Ward buffer is empty") return incoming end
+    if cap(resource) <= 0 then trace:reject("resource has no active Ward capacity") return incoming end
     local queued = incoming * 0.5
     local reserved = math.min(queued, state.buffer)
     state.buffer = state.buffer - reserved
@@ -119,7 +129,12 @@ local function bufferDamage(resource, incoming, calculationData)
         attack.skillPerksRestorationWardAbsorbedHealth =
             (tonumber(attack.skillPerksRestorationWardAbsorbedHealth) or 0) + reserved
     end
-    return incoming - reserved
+    local remaining=incoming-reserved
+    trace:finish("damage reserved",{
+        bufferAfter=state.buffer,drainAfter=state.drain,inflictionWindow=state.window,
+        maximumReservation=queued,remainingDamage=remaining,reserved=reserved,
+    })
+    return remaining
 end
 
 local function registerBufferCalculation(resource,calculation)
@@ -145,7 +160,7 @@ interfaces.ErnPerkFramework.registerSkillUseHandler({
     id="SkillPerks_restoration_linked_restore",
     skill="restoration", playerCastOnly=true,
     handler=function(event)
-        SkillDebug.traceEvent("restoration", "skill-use event", {
+        local trace=SkillDebug.beginTrace("restoration","Restoration cast","Restoration skill-use event",{
             cost = event and event.cost,
             spell = event and event.spell and event.spell.id,
         })
@@ -167,6 +182,9 @@ interfaces.ErnPerkFramework.registerSkillUseHandler({
             effectCount=#restoreEffects,
             effects=restoreEffects,
         }
+        trace:step("restore effects catalogued",{
+            effectCount=#restoreEffects,spellforge=debugState.lastCast.spellforge,
+        })
         if debugState.lastCast.spellforge then
             pendingSpellforgeCast = {
                 healthMissing=math.max(
@@ -179,10 +197,15 @@ interfaces.ErnPerkFramework.registerSkillUseHandler({
                 ),
                 expires=core.getSimulationTime() + 3,
             }
+            trace:step("Spellforge pre-application snapshot captured",pendingSpellforgeCast)
         end
 
         local b = rank("B")
-        if b == 0 or not event.spell then return end
+        if b == 0 then
+            return trace:finish("cast recorded; linked restoration inactive",{bRank=b})
+        end
+        if not event.spell then return trace:reject("skill-use event has no spell") end
+        local sessionsAdded=0
         for _, effect in ipairs(event.spell.effects or {}) do
             if effect.id == "restoreattribute" and ATTRIBUTE_LINK[effect.affectedAttribute] then
                 local attribute = effect.affectedAttribute
@@ -196,10 +219,17 @@ interfaces.ErnPerkFramework.registerSkillUseHandler({
                             ratio=b == 2 and 2 or 1, remaining=math.max(1,effect.duration or 1),
                             tick=1,
                         }
+                        sessionsAdded=sessionsAdded+1
+                        trace:step("attribute-linked session stored",{
+                            attribute=attribute,damaged=damaged,duration=math.max(1,effect.duration or 1),
+                            magnitude=magnitude,ratio=b==2 and 2 or 1,
+                            resource=ATTRIBUTE_LINK[attribute],
+                        })
                     end
                 end
             end
         end
+        trace:finish("cast processing complete",{attributeSessionsAdded=sessionsAdded,bRank=b})
     end,
 })
 
@@ -228,6 +258,11 @@ local function playerRestorePerSecond(resource)
             end
         end
     end
+    SkillDebug.traceState("restoration","Ward restore-source poll","restore-source-"..resource,{
+        activeSpell=debugState.lastRestoreEffect and debugState.lastRestoreEffect.activeSpellId,
+        qualifies=debugState.lastRestoreEffect and debugState.lastRestoreEffect.qualifies,
+        resource=resource,totalPerSecond=total,
+    })
     return total
 end
 
@@ -240,7 +275,17 @@ local function collectOverflow(dt)
             local stat = types.Actor.stats.dynamic[resource](self)
             local missing = math.max(0, maximum(resource) - stat.current)
             local delivered = rate * dt
-            addOverflow(resource, math.max(0, delivered - missing))
+            local overflow=math.max(0,delivered-missing)
+            local trace=SkillDebug.beginTrace("restoration","Ward overflow collection","restore poll tick",{
+                cap=cap(resource),delivered=delivered,dt=dt,missing=missing,
+                overflow=overflow,rate=rate,resource=resource,
+            })
+            if overflow>0 then
+                addOverflow(resource,overflow)
+                trace:finish("overflow forwarded to Ward")
+            else
+                trace:reject("restore was consumed by missing resource")
+            end
         end
     end
 end
@@ -251,20 +296,21 @@ end
 --- separate actual healing from Ward-generating overflow.
 local function onSpellforgeMagicHit(data)
     data = data or {}
-    SkillDebug.traceEvent("restoration", "Spellforge magic hit", {
+    local trace=SkillDebug.beginTrace("restoration","Spellforge bridge","magic-hit event",{
         spell = data.spellId,
     })
-    if not data.spellId then return end
+    if not data.spellId then return trace:reject("event has no spell id") end
     local now = core.getSimulationTime()
     if pendingSpellforgeCast and pendingSpellforgeCast.expires >= now then
         spellforgeSnapshots[tostring(data.spellId)] = pendingSpellforgeCast
-        return
+        return trace:finish("pending cast snapshot matched",pendingSpellforgeCast)
     end
     spellforgeSnapshots[tostring(data.spellId)] = {
         healthMissing=math.max(0, tonumber(data.healthMissing) or 0),
         fatigueMissing=math.max(0, tonumber(data.fatigueMissing) or 0),
         expires=now + 1,
     }
+    trace:finish("event fallback snapshot stored",spellforgeSnapshots[tostring(data.spellId)])
 end
 
 --- Accepts SFP's confirmed application of a Spellforge effect. Duration
@@ -279,7 +325,7 @@ local function onSpellforgeEffectApplied(data)
     local magnitude = math.max(0, tonumber(data.magnitude) or 0)
     local now = core.getSimulationTime()
     local snapshot = spellforgeSnapshots[spellId]
-    SkillDebug.traceEvent("restoration", "Spellforge effect applied", {
+    local trace=SkillDebug.beginTrace("restoration","Spellforge bridge","effect-applied event",{
         duration = duration,
         effect = effectId,
         magnitude = magnitude,
@@ -287,7 +333,9 @@ local function onSpellforgeEffectApplied(data)
         spell = spellId,
     })
     if spellId == "" or not snapshot or snapshot.expires < now then
-        return
+        return trace:reject("no live pre-application snapshot",{
+            now=now,snapshotExpires=snapshot and snapshot.expires,
+        })
     end
 
     spellforgeAuthorized[spellId] = now + math.max(1, duration + 0.5)
@@ -303,7 +351,9 @@ local function onSpellforgeEffectApplied(data)
         or effectId == "restorefatigue" and "fatigue"
         or nil
     if not resource or duration > 0 then
-        return
+        return trace:finish("duration effect authorized for active-spell polling",{
+            authorizationExpires=spellforgeAuthorized[spellId],resource=resource,
+        })
     end
 
     local missingKey = resource .. "Missing"
@@ -315,6 +365,10 @@ local function onSpellforgeEffectApplied(data)
     -- Suppress the polling fallback if OpenMW keeps this zero-duration effect
     -- visible for one frame; its full magnitude was already resolved above.
     spellforgeInstantHandled[spellId] = now + 0.5
+    trace:finish("instant restore resolved",{
+        missingBefore=missing,overflow=magnitude-restored,resource=resource,
+        restored=restored,suppressionExpires=spellforgeInstantHandled[spellId],
+    })
 end
 
 local function updateStates(dt)
@@ -331,6 +385,10 @@ local function updateStates(dt)
             state.window = math.max(0, state.window - dt)
             if state.drain < 0.01 then state.drain, state.window = 0, 0 end
         end
+        SkillDebug.traceState("restoration","Ward state","ward-state-"..resource,{
+            buffer=state.buffer,cap=allowed,drain=state.drain,idle=state.idle,
+            resource=resource,window=state.window,
+        })
     end
 end
 
@@ -341,7 +399,12 @@ local function updateAttributeSessions(dt)
             session.tick = 1
             local damaged = types.Actor.stats.attributes[attribute](self).damage or 0
             local amount = math.min(damaged, session.magnitude) * session.ratio
-            Common.restoreResource(self, session.resource, amount, ids["B" .. rank("B")])
+            local trace=SkillDebug.beginTrace("restoration","Attribute-Linked Restoration","session tick",{
+                attribute=attribute,damaged=damaged,magnitude=session.magnitude,
+                ratio=session.ratio,remaining=session.remaining,resource=session.resource,
+            })
+            local resolved=Common.restoreResource(self,session.resource,amount,ids["B"..rank("B")])
+            trace:finish("linked resource restored",{requested=amount,resolved=resolved})
         end
         if session.remaining <= 0 or (types.Actor.stats.attributes[attribute](self).damage or 0) <= 0 then
             attributeSessions[attribute] = nil
@@ -351,10 +414,18 @@ end
 
 local function clearMind()
     local c = rank("C")
-    if c == 0 then return end
+    local trace=SkillDebug.beginTrace("restoration","Clear Mind","one-second recovery tick",{
+        cRank=c,
+    })
+    if c == 0 then return trace:reject("C chain inactive") end
     local health = types.Actor.stats.dynamic.health(self)
     local fatigue = types.Actor.stats.dynamic.fatigue(self)
-    if health.current < maximum("health") or fatigue.current < maximum("fatigue") then return end
+    if health.current < maximum("health") or fatigue.current < maximum("fatigue") then
+        return trace:reject("Health or Fatigue is not full",{
+            fatigueCurrent=fatigue.current,fatigueMaximum=maximum("fatigue"),
+            healthCurrent=health.current,healthMaximum=maximum("health"),
+        })
+    end
     local rate = 1
     if c == 2 then
         for _, resource in ipairs({"health","fatigue"}) do
@@ -362,7 +433,8 @@ local function clearMind()
             if allowed > 0 and state.buffer + state.drain > allowed * 0.5 then rate = rate + 1 end
         end
     end
-    Common.restoreResource(self, "magicka", rate, ids["C" .. c])
+    local resolved=Common.restoreResource(self,"magicka",rate,ids["C"..c])
+    trace:finish("Magicka restored",{requested=rate,resolved=resolved})
 end
 
 local SWAP = {
@@ -379,13 +451,17 @@ interfaces.ErnPerkFramework.registerOnHitHandler({
     id="SkillPerks_restoration_warding_reprise", priority=675,
     direction=interfaces.ErnPerkFramework.HIT_DIRECTION.Incoming,
     handler=function(attack, context)
-        SkillDebug.traceEvent("restoration", "Warding Reprisal hit", {
+        local trace=SkillDebug.beginTrace("restoration","Warding Reprisal","incoming hit",{
             attacker = attack and SkillDebug.objectId(attack.attacker),
             healthDamage = attack and attack.damage and attack.damage.health,
         })
-        if rank("D") == 0 or not attack.attacker or attack.attacker == self
-                or not attack.attacker:isValid() or not attack.damage then return end
-        if attack.target and attack.target ~= self then return end
+        local d=rank("D")
+        if d == 0 then return trace:reject("D chain inactive") end
+        if not attack.attacker then return trace:reject("attack has no attacker") end
+        if attack.attacker == self then return trace:reject("attack is self-authored") end
+        if not attack.attacker:isValid() then return trace:reject("attacker unavailable") end
+        if not attack.damage then return trace:reject("attack has no damage payload") end
+        if attack.target and attack.target ~= self then return trace:reject("player is not target") end
         local reflected = {}
         for _, spell in pairs(types.Actor.activeSpells(self)) do
             if spell.caster == attack.attacker then
@@ -397,6 +473,10 @@ interfaces.ErnPerkFramework.registerOnHitHandler({
                         if resisted > 0 and landed > 0 then
                             local amount = landed * math.min(resisted, 95) / math.max(100 - math.min(resisted,95), 5)
                             table.insert(reflected,{id=swap.reflect,magnitudeMin=amount,duration=1})
+                            trace:step("resisted spell damage converted",{
+                                incomingEffect=effect.id,landed=landed,reflectedAmount=amount,
+                                reflectedEffect=swap.reflect,resistance=resisted,
+                            })
                         end
                     end
                 end
@@ -407,7 +487,7 @@ interfaces.ErnPerkFramework.registerOnHitHandler({
         -- does not exist until the Health calculation handler has run.
         local function applyReprisal(resolvedAttack)
             if not attack.attacker or not attack.attacker:isValid() then
-                return
+                return trace:reject("attacker unavailable after calculations")
             end
             local absorbed = tonumber(resolvedAttack.skillPerksRestorationWardAbsorbedHealth) or 0
             if rank("D") >= 2 and absorbed > 0 then
@@ -417,18 +497,20 @@ interfaces.ErnPerkFramework.registerOnHitHandler({
                     duration=1,
                 })
             end
-            SkillDebug.traceEvent("restoration", "Warding Reprisal resolved", {
-                absorbedHealth = absorbed,
-                effects = #reflected,
-            })
             if #reflected > 0 then
                 Common.applyDynamicSpell(attack.attacker,self,"Warding Reprisal",reflected)
+                return trace:finish("reprisal spell queued",{
+                    absorbedHealth=absorbed,effects=#reflected,
+                })
             end
+            trace:reject("no reflected or absorbed damage qualified",{absorbedHealth=absorbed})
         end
 
         if context and type(context.afterResolve) == "function" then
             context.afterResolve(applyReprisal)
+            trace:step("post-resolution callback registered",{precomputedEffects=#reflected})
         else
+            trace:step("resolving immediately; no post-resolution callback",{precomputedEffects=#reflected})
             applyReprisal(attack)
         end
     end,

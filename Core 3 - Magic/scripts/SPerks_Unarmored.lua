@@ -72,6 +72,14 @@ local function refreshPassives()
         sanctuary = math.max(0, (agility / 5 + luck / 10) * (1.25 - fatigueMultiplier))
     end
     effectTracker.apply("sanctuary", nil, sanctuary)
+    SkillDebug.traceState("unarmored","Unarmored passives","passives",{
+        aRank=a,cRank=c,dRank=d,emptySlots=empty,
+        fullyUnarmored=fullyUnarmored(),sanctuary=sanctuary,
+        shield=a > 0 and A_SHIELD[a] * empty or 0,
+        sound=a > 0 and A_SOUND[a] * empty or 0,
+        spellAbsorption=c > 0 and C_ABSORB[c] * empty or 0,
+        resistMagicka=c > 0 and C_RESIST[c] * empty or 0,
+    })
 end
 
 interfaces.ErnPerkFramework.registerCalculationHandler({
@@ -81,23 +89,38 @@ interfaces.ErnPerkFramework.registerCalculationHandler({
     priority = 700,
     direction = interfaces.ErnPerkFramework.HIT_DIRECTION.Incoming,
     handler = function(data)
-        SkillDebug.traceEvent("unarmored", "Body as Focus check", {
+        local trace=SkillDebug.beginTrace("unarmored","Body as Focus","incoming Health calculation",{
             damage = data and data.value,
             fatigueRatio = Common.dynamicRatio(self, "fatigue"),
             fullyUnarmored = fullyUnarmored(),
         })
-        if rank("D") == 0 or not fullyUnarmored()
-                or Common.dynamicRatio(self, "fatigue") < 0.25 then
+        local d=rank("D")
+        if d == 0 then
+            trace:reject("D chain inactive")
+            return nil
+        end
+        if not fullyUnarmored() then
+            trace:reject("armor gate failed",{emptySlots=emptySlots(),required=#ARMOR_SLOTS})
+            return nil
+        end
+        local fatigueRatio=Common.dynamicRatio(self, "fatigue")
+        if fatigueRatio < 0.25 then
+            trace:reject("Fatigue below 25% threshold",{fatigueRatio=fatigueRatio})
             return nil
         end
         local converted = math.max(0, data.value * 0.75)
-        interfaces.ErnPerkFramework.applyActorResourceDelta({
+        local resolved=interfaces.ErnPerkFramework.applyActorResourceDelta({
             actor = self, resource = "fatigue",
             operation = interfaces.ErnPerkFramework.RESOURCE_OPERATION.Damage,
             amount = converted, source = data.source, sourceEffect = ids.D1,
             context = { convertedFromHealth = true },
         })
-        return data.value - converted
+        local remaining=data.value-converted
+        trace:finish("Health damage converted",{
+            fatigueRequested=converted,fatigueResolved=resolved,
+            healthIncoming=data.value,healthRemaining=remaining,
+        })
+        return remaining
     end,
 })
 
@@ -106,6 +129,9 @@ local function updateCastingSpeed()
     local b = rank("B")
     if b > 0 and mostlyUnarmored() then speed = b == 2 and 1.50 or 1.25 end
     pcall(animation.setSpeed, self, "spellcast", speed)
+    SkillDebug.traceState("unarmored","Unburdened Casting","casting-speed",{
+        bRank=b,emptySlots=emptySlots(),mostlyUnarmored=mostlyUnarmored(),speed=speed,
+    })
 end
 
 local function clear()

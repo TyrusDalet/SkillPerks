@@ -37,65 +37,106 @@ local function rebuildTheftBonus()
     for attribute, amount in pairs(totals) do
         theftStats.apply("attributes", attribute, amount)
     end
+    SkillDebug.traceState("illusion","Mind Theft","theft-bonuses",{
+        activeTargets=SkillDebug.count(thefts),totals=totals,
+    })
 end
 
 local function onMindTheftDelta(data)
-    SkillDebug.traceEvent("illusion", "Mind Theft delta", {
+    local trace=SkillDebug.beginTrace("illusion","Mind Theft","target delta received",{
         key = data and data.key,
         remove = data and data.remove,
     })
-    if not data or not data.key then return end
+    if not data or not data.key then return trace:reject("delta has no target key") end
     if data.remove then thefts[data.key] = nil else thefts[data.key] = data.drains or {} end
+    trace:step(data.remove and "target theft removed" or "target theft stored",{
+        drains=data.drains,key=data.key,
+    })
     rebuildTheftBonus()
+    trace:finish("player attribute bonuses reconciled")
 end
 
 local function onSpellLanded(data)
-    SkillDebug.traceEvent("illusion", "spell landed", {
+    local trace=SkillDebug.beginTrace("illusion","Illusion landed effects","landed magic-effect event",{
         spell = data and data.spellId,
         target = data and SkillDebug.objectId(data.target),
     })
-    if not data or not data.target or not data.target:isValid()
-            or not Common.isPlayerCastLandedSpell(data) then return end
-    if rank("A") >= 3 and hasEffect(data, "paralyze") then
+    if not data or not data.target or not data.target:isValid() then
+        return trace:reject("target is missing or unavailable")
+    end
+    if not Common.isPlayerCastLandedSpell(data) then
+        return trace:reject("source is not an allowed player-cast spell")
+    end
+    local a=rank("A")
+    local paralyze=hasEffect(data,"paralyze")
+    if a >= 3 and paralyze then
         data.target:sendEvent("SPerks_IllusionMindTheft", {
             caster = self, activeSpellId = data.activeSpellId,
         })
+        trace:step("Mind Theft delivered",{aRank=a,activeSpellId=data.activeSpellId})
+    else
+        trace:step("Mind Theft skipped",{aRank=a,hasParalyze=paralyze~=nil})
     end
-    if rank("A") >= 4 and (hasEffect(data, "calmhumanoid") or hasEffect(data, "calmcreature")) then
-        data.target:sendEvent("SPerks_IllusionClearAlarm", {})
+    local calm=hasEffect(data,"calmhumanoid") or hasEffect(data,"calmcreature")
+    if a >= 4 and calm then
+        data.target:sendEvent("SPerks_IllusionClearAlarm", { caster=self })
+        trace:step("Clear Alarm delivered",{aRank=a,calmEffect=calm.id})
+    else
+        trace:step("Clear Alarm skipped",{aRank=a,hasCalm=calm~=nil})
     end
     local charm = hasEffect(data, "charm")
     local d = rank("D")
     if d > 0 and charm and types.NPC.objectIsInstance(data.target) then
         local disposition = types.NPC.getDisposition(data.target, self)
         local magnitude = tonumber(charm.magnitude) or Common.averageMagnitude(charm)
-        if disposition + magnitude > 100 then
+        local projected=disposition+magnitude
+        trace:step("Total Devotion threshold calculated",{
+            charmMagnitude=magnitude,dRank=d,disposition=disposition,projected=projected,
+        })
+        if projected > 100 then
             Common.applyDynamicSpell(data.target, self, "Total Devotion", {{
                 id = "commandhumanoid", magnitudeMin = d == 2 and 25 or 10,
                 duration = charm.duration or 1,
             }})
+            trace:step("Total Devotion queued",{commandMagnitude=d==2 and 25 or 10})
+        else
+            trace:step("Total Devotion skipped",{reason="projected disposition does not exceed 100"})
         end
+    else
+        trace:step("Total Devotion skipped",{
+            dRank=d,hasCharm=charm~=nil,isNpc=types.NPC.objectIsInstance(data.target),
+        })
     end
+    trace:finish("landed Illusion effects processed")
 end
 
 interfaces.ErnPerkFramework.registerOnHitHandler({
     id = "SkillPerks_illusion_mind_games_hit", priority = 650,
     direction = interfaces.ErnPerkFramework.HIT_DIRECTION.Incoming,
     handler = function(attack)
-        SkillDebug.traceEvent("illusion", "Mind Games hit check", {
+        local trace=SkillDebug.beginTrace("illusion","Mind Games","incoming hit resolved",{
             successful = attack and attack.successful,
         })
-        if attack.successful == false and rank("A") >= 2
-                and Common.playerSpellEffectMagnitude(self, "sanctuary") > 0 then
-            Common.restoreResource(self, "fatigue", 5, ids.A2)
-        end
+        local a=rank("A")
+        if attack.successful ~= false then return trace:reject("attack did not miss") end
+        if a < 2 then return trace:reject("A2 is not owned",{aRank=a}) end
+        local sanctuary=Common.playerSpellEffectMagnitude(self,"sanctuary")
+        if sanctuary<=0 then return trace:reject("no qualifying player-cast Sanctuary",{magnitude=sanctuary}) end
+        local resolved=Common.restoreResource(self, "fatigue", 5, ids.A2)
+        trace:finish("Fatigue restored",{requested=5,resolved=resolved,sanctuary=sanctuary})
     end,
 })
 
 local function reduction()
     local c = rank("C")
-    if c == 0 or types.Actor.canMove(self) then return nil end
-    return c == 2 and 2 or 1.25
+    local trace=SkillDebug.beginTrace("illusion","Unshaken Mind","incoming damage calculation",{
+        canMove=types.Actor.canMove(self),cRank=c,
+    })
+    if c == 0 then trace:reject("C chain inactive") return nil end
+    if types.Actor.canMove(self) then trace:reject("player is not paralysed") return nil end
+    local divider=c == 2 and 2 or 1.25
+    trace:finish("damage divider returned",{divider=divider})
+    return divider
 end
 for _, calculation in ipairs({
     interfaces.ErnPerkFramework.CALCULATION.HIT_DAMAGE_HEALTH,
@@ -115,11 +156,13 @@ interfaces.ErnPerkFramework.registerSkillUseHandler({
     id = "SkillPerks_illusion_measured_deception",
     skill = "illusion", playerCastOnly = true,
     handler = function(event)
-        SkillDebug.traceEvent("illusion", "skill-use event", {
+        local trace=SkillDebug.beginTrace("illusion","Measured Deception","Illusion skill-use event",{
             cost = event and event.cost,
             spell = event and event.spell and event.spell.id,
         })
-        if rank("B") == 0 or not event.spell then return end
+        local b=rank("B")
+        if b == 0 then return trace:reject("B chain inactive") end
+        if not event.spell then return trace:reject("skill-use event has no spell") end
         local nonSelf = false
         for _, effect in ipairs(event.spell.effects or {}) do
             if effect.range ~= core.magic.RANGE.Self then nonSelf = true break end
@@ -129,6 +172,9 @@ interfaces.ErnPerkFramework.registerSkillUseHandler({
                 spellId = event.spell.id, cost = event.cost or 0,
                 elapsed = 0, nextPoll = 0.15,
             })
+            trace:finish("landed-effect check queued",{cost=event.cost or 0,pending=#pendingChecks})
+        else
+            trace:reject("spell contains only self-range effects")
         end
     end,
 })
@@ -156,6 +202,12 @@ local function refreshPassives()
     local c = rank("C")
     effects.apply("resistmagicka", nil, c == 2 and 20 or c == 1 and 10 or 0)
     effects.apply("resistparalysis", nil, c == 2 and 50 or c == 1 and 20 or 0)
+    SkillDebug.traceState("illusion","Illusion passives","passives",{
+        blindIncoming=blind,blindOffset=-math.min(math.max(0,blind),math.max(0,nightEye)),
+        cRank=c,nightEye=nightEye,
+        resistMagicka=c == 2 and 20 or c == 1 and 10 or 0,
+        resistParalysis=c == 2 and 50 or c == 1 and 20 or 0,
+    })
 end
 
 local function onUpdate(dt)
@@ -167,10 +219,22 @@ local function onUpdate(dt)
         check.nextPoll = check.nextPoll - dt
         if check.nextPoll <= 0 then
             check.nextPoll = 0.2
-            if landed(check) then table.remove(pendingChecks, index)
+            if landed(check) then
+                local trace=SkillDebug.beginTrace("illusion","Measured Deception","landed-effect poll",{
+                    elapsed=check.elapsed,spell=check.spellId,
+                })
+                trace:finish("spell affected at least one target; no refund")
+                table.remove(pendingChecks, index)
             elseif check.elapsed >= 10 then
                 local percent = rank("B") == 2 and 0.75 or 0.30
-                Common.restoreResource(self, "magicka", math.floor(check.cost * percent), ids.B1)
+                local requested=math.floor(check.cost*percent)
+                local trace=SkillDebug.beginTrace("illusion","Measured Deception","effect check expired",{
+                    cost=check.cost,elapsed=check.elapsed,spell=check.spellId,
+                })
+                local resolved=Common.restoreResource(self,"magicka",requested,ids.B1)
+                trace:finish("Magicka refund delivered",{
+                    percent=percent,requested=requested,resolved=resolved,
+                })
                 table.remove(pendingChecks, index)
             end
         end

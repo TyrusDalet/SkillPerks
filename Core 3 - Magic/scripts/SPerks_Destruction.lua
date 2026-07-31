@@ -29,16 +29,22 @@ local function targetRatio(target,resource)
     return math.max(0,math.min(1,(stat.current or maximum)/maximum))
 end
 local function damage(target,resource,amount,effectId,damageType)
-    if amount <= 0 then return end
+    if amount <= 0 then return false end
     local event=resource=="health" and "SPerks_TakeDamage"
         or resource=="fatigue" and "SPerks_TakeFatigue" or "SPerks_TakeMagicka"
     target:sendEvent(event,{amount=amount,source=self,sourceEffect=effectId,damageType=damageType})
+    return true
 end
 
 interfaces.ErnPerkFramework.registerSkillUseHandler({
     id="SkillPerks_destruction_cast_cost",skill="destruction",playerCastOnly=true,
     handler=function(event)
-        if event.spell then castCosts[event.spell.id]=event.cost or 0 end
+        local trace=SkillDebug.beginTrace("destruction","Cast-cost ledger","Destruction skill-use event",{
+            cost=event and event.cost,spell=event and event.spell and event.spell.id,
+        })
+        if not event.spell then return trace:reject("skill-use event has no spell") end
+        castCosts[event.spell.id]=event.cost or 0
+        trace:finish("cast cost stored",{cost=castCosts[event.spell.id],spell=event.spell.id})
     end,
 })
 
@@ -70,24 +76,37 @@ local onConsoleCommand = SkillDebug.makeHandler({
 })
 
 local function chainShock(origin,amount)
+    local trace=SkillDebug.beginTrace("destruction","Executioner's Element","Shock chain search",{
+        amount=amount,origin=SkillDebug.objectId(origin),
+    })
     for _,actor in ipairs(nearby.actors) do
-        if actor ~= origin and actor:isValid() and targetRatio(actor,"magicka") < 0.25 then
+        local ratio=actor:isValid() and targetRatio(actor,"magicka") or nil
+        trace:step("candidate checked",{
+            actor=SkillDebug.objectId(actor),isOrigin=actor==origin,
+            magickaRatio=ratio,valid=actor:isValid(),
+        })
+        if actor ~= origin and actor:isValid() and ratio < 0.25 then
             Common.applyDynamicSpell(actor,self,"Elemental Mastery",{{id="shockdamage",magnitudeMin=amount,duration=1}})
-            return
+            return trace:finish("chain Shock queued",{target=SkillDebug.objectId(actor)})
         end
     end
+    trace:reject("no vulnerable secondary actor found")
 end
 
 local function onSpellLanded(data)
     local target=data and data.target
-    SkillDebug.traceEvent("destruction", "spell landed", {
+    local trace=SkillDebug.beginTrace("destruction","Destruction riders","landed magic-effect event",{
+        effects=data and #(data.effects or {}) or 0,
+        item=data and SkillDebug.objectId(data.item),
         spell = data and data.spellId,
         target = SkillDebug.objectId(target),
     })
-    if not target or not target:isValid() then return end
+    if not target or not target:isValid() then return trace:reject("target unavailable") end
     local c=rank("C")
     local playerCast=Common.isPlayerCastLandedSpell(data)
-    if not playerCast and c == 0 then return end
+    if not playerCast and c == 0 then
+        return trace:reject("source is not player-cast and C chain is inactive")
+    end
     local a,b,d=rank("A"),rank("B"),rank("D")
     local sourceCost=castCosts[data.spellId] or 0
     if data.item then
@@ -95,27 +114,46 @@ local function onSpellLanded(data)
         if enchantment then
             sourceCost=enchantment.type==core.magic.ENCHANTMENT_TYPE.CastOnce
                 and 50 or math.max(1,enchantment.cost or 1)
+            trace:step("item source cost resolved",{
+                enchantmentType=enchantment.type,sourceCost=sourceCost,
+            })
         end
     end
+    trace:step("perk routes selected",{
+        aRank=a,bRank=b,cRank=c,dRank=d,playerCast=playerCast,sourceCost=sourceCost,
+    })
 
-    for _,effect in ipairs(data.effects or {}) do
+    for index,effect in ipairs(data.effects or {}) do
         local id=effect.id
         local magnitude=math.max(0,tonumber(effect.magnitude) or Common.averageMagnitude(effect))
         local duration=math.max(1,tonumber(effect.duration) or 1)
         local element=ELEMENT[id]
+        trace:step("effect inspected",{
+            duration=duration,effect=id,index=index,magnitude=magnitude,
+            targetHealthRatio=targetRatio(target,"health"),
+            targetFatigueRatio=targetRatio(target,"fatigue"),
+            targetMagickaRatio=targetRatio(target,"magicka"),
+        })
 
         if element and a > 0 then
             local cap=({0.10,0.25,0.50,1.00})[a]
             local bonus=magnitude*(1-targetRatio(target,element.resource))*cap
             if d >= 2 and playerCast and targetRatio(target,element.resource)<0.25 then bonus=bonus+magnitude end
-            damage(target,"health",bonus,ids["A"..a],element.damageType)
+            local queued=damage(target,"health",bonus,ids["A"..a],element.damageType)
+            trace:step("Elemental Pressure resolved",{
+                bonus=bonus,cap=cap,pairedResource=element.resource,queued=queued,
+            })
         end
 
         if id:find("^drain") and a > 0 then
             local ratio=({0.10,0.125,0.20,0.50})[a]
             local resource=DRAIN_RESOURCE[id]
             if resource then
-                damage(target,resource,magnitude*ratio,ids["A"..a],"drain")
+                local bonus=magnitude*ratio
+                local queued=damage(target,resource,bonus,ids["A"..a],"drain")
+                trace:step("Drain rider queued",{
+                    amount=bonus,queued=queued,ratio=ratio,resource=resource,
+                })
             elseif id=="drainattribute" then
                 Common.applyDynamicSpell(target,self,"Drain Mastery",{{id="damageattribute",affectedAttribute=effect.affectedAttribute,magnitudeMin=magnitude*ratio,duration=1}})
             elseif id=="drainskill" then
@@ -126,11 +164,16 @@ local function onSpellLanded(data)
                     caster=self,cost=sourceCost,duration=duration,
                     refundRatio=b==2 and 1 or 0.5,
                 })
+                trace:step("Drain-kill refund marker delivered",{
+                    cost=sourceCost,duration=duration,refundRatio=b==2 and 1 or 0.5,
+                })
             end
         end
 
         if c > 0 and (id=="damagehealth" or id=="drainhealth" or id=="absorbhealth" or id=="poison") then
-            damage(target,"health",magnitude*(c==2 and 0.50 or 0.25),ids["C"..c],"rawpower")
+            local bonus=magnitude*(c==2 and 0.50 or 0.25)
+            local queued=damage(target,"health",bonus,ids["C"..c],"rawpower")
+            trace:step("Raw Power queued",{amount=bonus,cRank=c,queued=queued})
         end
 
         if b > 0 then
@@ -138,22 +181,36 @@ local function onSpellLanded(data)
             if id=="firedamage" then
                 local finisher=d>=2 and playerCast and targetRatio(target,"health")<0.25 and 2 or 1
                 Common.applyDynamicSpell(target,self,"Elemental Consequence",{{id="disintegratearmor",magnitudeMin=magnitude*duration*scale*finisher,duration=1}})
+                trace:step("Fire consequence queued",{
+                    disintegrate=magnitude*duration*scale*finisher,finisher=finisher,scale=scale,
+                })
             elseif id=="frostdamage" then
-                damage(target,"fatigue",magnitude*duration*scale,ids["B"..b],"frost")
+                local amount=magnitude*duration*scale
+                local queued=damage(target,"fatigue",amount,ids["B"..b],"frost")
+                trace:step("Frost consequence queued",{amount=amount,queued=queued})
                 if d>=2 and playerCast and targetRatio(target,"fatigue")<0.25 then
                     Common.applyDynamicSpell(target,self,"Frozen Finish",{{id="paralyze",magnitudeMin=1,duration=1}})
+                    trace:step("Frozen Finish queued")
                 end
             elseif id=="shockdamage" then
-                damage(target,"magicka",magnitude*duration*scale,ids["B"..b],"shock")
+                local amount=magnitude*duration*scale
+                local queued=damage(target,"magicka",amount,ids["B"..b],"shock")
+                trace:step("Shock consequence queued",{amount=amount,queued=queued})
                 if d>=2 and playerCast and targetRatio(target,"magicka")<0.25 then chainShock(target,magnitude) end
             elseif id=="poison" then
                 target:sendEvent("SPerks_DestructionPoisonConsequence",{
+                    caster=self,
                     duration=duration,cap=b==2 and 20 or 10,
                     weakness=b==2 and 15 or 5,speed=b==2 and 10 or 5,
+                })
+                trace:step("Poison consequence marker delivered",{
+                    cap=b==2 and 20 or 10,duration=duration,
+                    speed=b==2 and 10 or 5,weakness=b==2 and 15 or 5,
                 })
             end
         end
     end
+    trace:finish("all landed effects processed")
 end
 
 local function protectedElement()
@@ -170,8 +227,18 @@ end
 -- Removing the reflected active spell before its next tick provides D1's
 -- weather immunity without altering the original outgoing cast.
 local function suppressWeatherReflection()
-    if rank("D")==0 then reflectedSeen={} return end
+    local d=rank("D")
+    if d==0 then
+        reflectedSeen={}
+        SkillDebug.traceState("destruction","Weather reflection","weather-protection",{
+            dRank=0,protectedElement=nil,
+        })
+        return
+    end
     local protected=protectedElement()
+    SkillDebug.traceState("destruction","Weather reflection","weather-protection",{
+        dRank=d,protectedElement=protected,
+    })
     if not protected then return end
     local current={}
     for _,spell in pairs(types.Actor.activeSpells(self)) do
@@ -180,7 +247,11 @@ local function suppressWeatherReflection()
         if not reflectedSeen[key] and spell.caster==self then
             for _,effect in pairs(spell.effects or {}) do
                 if effect.id==protected and (tonumber(effect.magnitudeThisFrame) or 0)>0 then
+                    local trace=SkillDebug.beginTrace("destruction","Elemental Mastery","reflected active spell observed",{
+                        activeSpell=key,effect=effect.id,magnitude=effect.magnitudeThisFrame,
+                    })
                     types.Actor.activeSpells(self):remove(spell.activeSpellId)
+                    trace:finish("reflected spell removed")
                     break
                 end
             end
@@ -206,7 +277,12 @@ return {
     eventHandlers={
         SPerks_MagicEffectLanded=onSpellLanded,
         SPerks_DestructionDrainKillRefund=function(data)
-            Common.restoreResource(self,"magicka",data and data.amount or 0,ids["B"..rank("B")])
+            local amount=data and data.amount or 0
+            local trace=SkillDebug.beginTrace("destruction","Drain-kill refund","target death acknowledgement",{
+                amount=amount,bRank=rank("B"),
+            })
+            local resolved=Common.restoreResource(self,"magicka",amount,ids["B"..rank("B")])
+            trace:finish("Magicka refund delivered",{requested=amount,resolved=resolved})
         end,
     },
     engineHandlers={

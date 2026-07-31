@@ -97,17 +97,18 @@ Universal Antidote uses the following harmful-to-beneficial conversions:
 
 ### Alteration
 
-- **A1 - Effortless Casting:** Player-cast Swift Swim eases exertion; Water
-  Breathing also grants brief Night-Eye.
-- **A2 - Light Step:** Player-cast Jump also reduces Fatigue spent moving and
-  leaping.
+- **A1 - Effortless Casting:** While player-cast Swift Swim is active,
+  swimming costs 50% less Fatigue. Player-cast Water Breathing also grants
+  10 Night-Eye.
+- **A2 - Light Step:** While player-cast Jump is active, jumping costs 50%
+  less Fatigue.
 - **A3 - Counterweight:** Player-cast Feather negates equal Burden; Burden on
   others also briefly drains Strength.
 - **A4 - Unbound Motion:** Player-cast Levitate grants Paralysis immunity.
-- **B1 - Reduced Casting Cost:** Refunds 15% of Alteration spell cost; adjusted
-  costs below 10 become free.
+- **B1 - Reduced Casting Cost:** Refunds up to 15% of Alteration spell cost
+  after other refunds; adjusted costs below 10 become free.
 - **B2 - Second Nature:** Refund rises to 30%; adjusted costs below 25 become
-  free.
+  free. Combined refunds cannot exceed the spell's cost.
 - **C1 - Steady Footing:** -5 Sound and enough Shield to maintain at least
   35 armor rating.
 - **C2 - Immovable Principle:** -10 Sound and enough Shield to maintain at
@@ -119,19 +120,21 @@ Universal Antidote uses the following harmful-to-beneficial conversions:
 
 #### Alteration Mechanics
 
-- Effortless Casting grants +10 Fortify Fatigue while a player-cast Swift
-  Swim is active and grants 10 Night-Eye while a player-cast Water Breathing
-  effect is active.
-- Light Step also activates that +10 Fortify Fatigue while a player-cast Jump
-  effect is active.
+- Effortless Casting refunds 50% of the Fatigue actually spent swimming while
+  a player-cast Swift Swim effect is active. It also grants 10 Night-Eye while
+  a player-cast Water Breathing effect is active.
+- Light Step refunds 50% of the Fatigue actually spent on each jump while a
+  player-cast Jump effect is active.
 - Counterweight adds enough Feather to cancel existing Burden, up to the
   magnitude of the active player-cast Feather. Burden cast on another actor
   also drains Strength by 25% of its magnitude for up to 10 seconds.
 - Unbound Motion grants 100% Resist Paralysis while player-cast Levitate is
   active.
-- Reduced Casting Cost refunds whole points of Magicka after a successful
-  cast. If the adjusted cost would be below its free-cast threshold, the
-  entire original cost is refunded.
+- Reduced Casting Cost waits briefly for other Magicka-refund mechanics, then
+  refunds only the spell cost that remains unrestored. It refunds whole points
+  of Magicka and cannot raise Magicka above its pre-cast value. If the adjusted
+  cost would be below its free-cast threshold, the remaining original cost is
+  refunded.
 - Steady Footing and Immovable Principle measure armor supplied by equipped
   armor and add only the Shield needed to reach their stated floor.
 - Each active player-cast Shield, Fire Shield, Frost Shield, or Lightning
@@ -148,7 +151,8 @@ Universal Antidote uses the following harmful-to-beneficial conversions:
 ### Conjuration
 
 - **A1 - Easier Summoning:** -5 Sound while selecting a summon spell;
-  successful summons have a 10% chance to call a second servant.
+  successful summons have a 10% chance to call a second servant. Recasting
+  that spell dismisses its previous bonus servants.
 - **A2 - Widened Gate:** Sound becomes -10 and chance rises to 20%.
 - **A3 - Crowded Threshold:** Sound becomes -15 and chance rises to 30%.
 - **A4 - Legion Beyond:** Sound becomes -25; 50% chance for a second summon,
@@ -169,6 +173,10 @@ Universal Antidote uses the following harmful-to-beneficial conversions:
 - A-chain bonus summons repeat only the summoning effects from the successful
   spell. Legion Beyond first rolls its 50% second-summon chance; the 25% third
   summon is rolled only if the second summon succeeds.
+- Successfully casting the same summon spell again dismisses the bonus
+  instances created by its previous cast before rolling new ones, matching
+  vanilla's per-spell replacement behavior. Different summon spells remain
+  independent.
 - Empowered Servants and Deathless Retinue increase every base attribute,
   every applicable base skill, and base maximum Health by 25% or 35% for the
   original summon duration. Deathless Retinue also restores 2 Health per
@@ -329,7 +337,8 @@ Universal Antidote uses the following harmful-to-beneficial conversions:
 - **A2 - Resonant Capture:** Conversion rises to 10%.
 - **A3 - Deep Resonance:** Conversion rises to 15%.
 - **A4 - Perfect Soul Circuit:** Conversion rises to 25%.
-- **B1 - Soul Tether:** Soultrap also applies 1 point per second Absorb Magicka.
+- **B1 - Soul Tether:** Soultrap also applies a non-stacking 1 point per second
+  Absorb Magicka for its duration. Recasting Soultrap does not refresh it.
 - **B2 - Final Dividend:** Absorption rises to 2 per second; death during the
   tether restores 20% of soul value as Magicka.
 - **C1 - Hungry Soul:** Below 50% Magicka, gain scaling Spell Absorption up
@@ -348,8 +357,11 @@ Universal Antidote uses the following harmful-to-beneficial conversions:
   same group.
 - Only creatures have a soul value. The converted charge is rounded down.
 - Soul Tether lasts for the Soultrap duration and ignores reflection,
-  resistance, and absorption. Final Dividend's death restoration is rounded
-  up and is paid only when the target dies before the tether expires.
+  resistance, and absorption. Repeated Soultrap casts neither stack its
+  Absorb Magicka nor refresh its duration. Existing duplicate effects are
+  collapsed to the oldest, shortest-lived tether. Final Dividend's death
+  restoration is rounded up and is paid only when the target dies before the
+  tether expires.
 - Hungry Soul begins below 50% Magicka and scales linearly: it reaches 25%
   Spell Absorption at empty Magicka. Abyssal Appetite reaches 50%.
 - Telekinetic Force requires active player-cast Telekinesis and a hostile
@@ -459,9 +471,18 @@ Each command reports the skill's owned chain ranks and relevant live state,
 including tracked casts, targets, effect pools, reserves, equipment gates, and
 active spell-compatibility information where applicable.
 
-Append ` trace` to any command to toggle its live activation trace, such as
-`luarestoration debug trace`. Trace output requires SkillPerks verbosity `3`;
-enter the same command again to disable it.
+Append ` trace` to any command to toggle its live activation trace, or use
+`trace on`, `trace off`, and `trace status` explicitly. For example:
+
+- `luarestoration debug trace on`
+- `luarestoration debug trace status`
+- `luarestoration debug trace off`
+
+Trace output requires SkillPerks verbosity `3`. Each activation is numbered
+and reports its trigger, eligibility gates, source classification, calculations,
+random rolls, resource or spell delivery, target-local handling, and final
+application acknowledgement. Passive calculations print when their inputs or
+outputs change rather than repeating unchanged state every update.
 
 Shorter aliases remain available: `luaalch debug`, `luaalt debug`, `luaconj
 debug`, `luadest debug`, `luaillu debug`, `luamyst debug`, `luarest debug`, and

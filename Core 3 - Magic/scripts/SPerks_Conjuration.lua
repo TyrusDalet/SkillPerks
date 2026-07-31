@@ -26,6 +26,8 @@ local castExpiresAt = 0
 local previousActorSnapshot = nil
 local latestActorSnapshot = nil
 local trackingSource = "none"
+local bonusSummonsBySpell = {}
+local pendingBonusCapture = nil
 local debugState = {
     casts = 0,
     discovered = 0,
@@ -82,6 +84,104 @@ local function summonDuration(spell)
     return duration
 end
 
+--- Captures the player's current active-spell instances for one record.
+--- The A chain uses the difference after `activeSpells:add` to identify only
+--- the bonus instances it created; the vanilla cast is already in this
+--- baseline and is therefore never removed by SkillPerks.
+local function activeSpellInstanceSnapshot(spellId)
+    local result={}
+    for _,activeSpell in pairs(types.Actor.activeSpells(self)) do
+        if activeSpell.id==spellId and activeSpell.caster==self
+                and activeSpell.activeSpellId~=nil then
+            result[activeSpell.activeSpellId]=true
+        end
+    end
+    return result
+end
+
+--- Finds bonus instances created after the saved baseline. OpenMW normally
+--- exposes additions immediately, but the short pending window also supports
+--- builds where the ActiveSpell list updates on the following frame.
+local function captureAddedBonusSummons()
+    local pending=pendingBonusCapture
+    if not pending then return end
+    local tracked=bonusSummonsBySpell[pending.spellId] or {}
+    local captured=0
+    for activeId in pairs(activeSpellInstanceSnapshot(pending.spellId)) do
+        if not pending.before[activeId] then
+            tracked[activeId]=true
+        end
+    end
+    for _ in pairs(tracked) do captured=captured+1 end
+    bonusSummonsBySpell[pending.spellId]=tracked
+    SkillDebug.traceState("conjuration","Bonus summon tracking",
+        "bonus-capture-"..tostring(pending.spellId),{
+            captured=captured,expected=pending.expected,spell=pending.spellId,
+        })
+    if captured>=pending.expected or core.getSimulationTime()>=pending.expiresAt then
+        SkillDebug.traceEvent("conjuration","bonus summon capture complete",{
+            captured=captured,expected=pending.expected,spell=pending.spellId,
+        })
+        pendingBonusCapture=nil
+    end
+end
+
+--- Removes only the A-chain instances previously captured for this spell.
+--- Recasting another summon spell leaves these instances alone, matching
+--- vanilla's per-spell replacement behavior.
+local function dismissBonusSummons(spellId)
+    captureAddedBonusSummons()
+    local tracked=bonusSummonsBySpell[spellId]
+    if not tracked then return 0,0 end
+    local active=activeSpellInstanceSnapshot(spellId)
+    local removed,missing=0,0
+    for activeId in pairs(tracked) do
+        if active[activeId] then
+            local ok=pcall(function()
+                types.Actor.activeSpells(self):remove(activeId)
+            end)
+            if ok then removed=removed+1 else missing=missing+1 end
+        else
+            missing=missing+1
+        end
+    end
+    bonusSummonsBySpell[spellId]=nil
+    return removed,missing
+end
+
+--- Dismisses every tracked A-chain summon, used when its perks are removed.
+local function dismissAllBonusSummons()
+    local spellIds={}
+    for spellId in pairs(bonusSummonsBySpell) do spellIds[#spellIds+1]=spellId end
+    for _,spellId in ipairs(spellIds) do dismissBonusSummons(spellId) end
+    pendingBonusCapture=nil
+end
+
+--- Drops identifiers whose bonus spell expired naturally, keeping save data
+--- and diagnostics limited to instances that can still be dismissed.
+local function pruneExpiredBonusSummons()
+    for spellId,tracked in pairs(bonusSummonsBySpell) do
+        local active=activeSpellInstanceSnapshot(spellId)
+        local remaining=0
+        for activeId in pairs(tracked) do
+            if active[activeId] then
+                remaining=remaining+1
+            else
+                tracked[activeId]=nil
+            end
+        end
+        if remaining==0 then bonusSummonsBySpell[spellId]=nil end
+    end
+end
+
+local function trackedBonusSummonCount()
+    local count=0
+    for _,tracked in pairs(bonusSummonsBySpell) do
+        for _ in pairs(tracked) do count=count+1 end
+    end
+    return count
+end
+
 latestActorSnapshot = actorSnapshot()
 previousActorSnapshot = copySnapshot(latestActorSnapshot)
 
@@ -89,11 +189,19 @@ interfaces.AnimationController.addTextKeyHandler("", function(group, key)
     if group ~= "spellcast" then return end
     if key == "self start" or key == "touch start" or key == "target start" then
         local spell = types.Player.getSelectedSpell(self)
-        if Common.actorKnowsCastableSpell(self, spell)
-                and #summonEffects(spell) > 0 then
+        local summons=#summonEffects(spell)
+        local trace=SkillDebug.beginTrace("conjuration","Summon tracking","spellcast animation started",{
+            key=key,spell=spell and spell.id,summonEffects=summons,
+        })
+        if Common.actorKnowsCastableSpell(self, spell) and summons > 0 then
             castActors, summonCast = actorSnapshot(), spell
             castExpiresAt = core.getSimulationTime() + 3
             trackingSource = "animation"
+            trace:finish("tracking window opened",{
+                actorsBefore=SkillDebug.count(castActors),expiresAt=castExpiresAt,
+            })
+        else
+            trace:reject("selected spell is not a known summon spell")
         end
     elseif key == "self stop" or key == "touch stop" or key == "target stop" then
         castActors = castActors or {}
@@ -105,11 +213,11 @@ interfaces.ErnPerkFramework.registerSkillUseHandler({
     skill="conjuration", playerCastOnly=true,
     handler=function(event)
         local list = summonEffects(event.spell)
-        SkillDebug.traceEvent("conjuration", "skill-use event", {
+        local trace=SkillDebug.beginTrace("conjuration","Summoning cast","Conjuration skill-use event",{
             spell = event and event.spell and event.spell.id,
             summonEffects = #list,
         })
-        if #list == 0 then return end
+        if #list == 0 then return trace:reject("spell contains no summon effects") end
 
         -- The framework's skill event is authoritative even on animation sets
         -- that omit the usual spellcast text keys. The previous rolling
@@ -119,6 +227,13 @@ interfaces.ErnPerkFramework.registerSkillUseHandler({
             castActors = copySnapshot(previousActorSnapshot
                 or latestActorSnapshot or actorSnapshot())
             trackingSource = "skill-fallback"
+            trace:step("animation snapshot unavailable; fallback snapshot selected",{
+                actorsBefore=SkillDebug.count(castActors),
+            })
+        else
+            trace:step("animation snapshot retained",{
+                actorsBefore=SkillDebug.count(castActors),
+            })
         end
         summonCast = event.spell
         castExpiresAt = math.max(
@@ -127,11 +242,27 @@ interfaces.ErnPerkFramework.registerSkillUseHandler({
         )
         debugState.casts = debugState.casts + 1
 
+        local dismissed,stale=dismissBonusSummons(event.spell.id)
+        trace:step("previous bonus instances dismissed",{
+            removed=dismissed,spell=event.spell.id,stale=stale,
+        })
+
         local a = rank("A")
         if a > 0 then
             local firstChance=({0.10,0.20,0.30,0.50})[a]
-            local extra = math.random() < firstChance and 1 or 0
-            if a == 4 and extra == 1 and math.random() < 0.25 then extra = 2 end
+            local firstRoll=math.random()
+            local extra = firstRoll < firstChance and 1 or 0
+            local secondRoll=nil
+            if a == 4 and extra == 1 then
+                secondRoll=math.random()
+                if secondRoll < 0.25 then extra = 2 end
+            end
+            trace:step("bonus summon rolls resolved",{
+                aRank=a,extraSummons=extra,firstChance=firstChance,
+                firstRoll=firstRoll,secondChance=a==4 and 0.25 or nil,
+                secondRoll=secondRoll,
+            })
+            local before=activeSpellInstanceSnapshot(event.spell.id)
             for _=1,extra do
                 types.Actor.activeSpells(self):add({
                     id=event.spell.id,
@@ -141,7 +272,20 @@ interfaces.ErnPerkFramework.registerSkillUseHandler({
                     caster=self, stackable=true, quiet=true,
                 })
             end
+            if extra>0 then
+                pendingBonusCapture={
+                    before=before,expected=extra,
+                    expiresAt=core.getSimulationTime()+0.5,
+                    spellId=event.spell.id,
+                }
+                captureAddedBonusSummons()
+            end
+        else
+            trace:step("bonus summon skipped",{reason="A chain inactive"})
         end
+        trace:finish("summon cast tracking armed",{
+            expiresAt=castExpiresAt,source=trackingSource,
+        })
     end,
 })
 
@@ -196,13 +340,21 @@ local function refreshPassives()
     for _,entry in ipairs(pieces) do totals[entry.attribute]=totals[entry.attribute]+each end
     for attribute,amount in pairs(totals) do stats.apply("attributes",attribute,amount) end
     stats.apply("skills","conjuration",d == 2 and weight >= 7 and 50 or 0)
+    SkillDebug.traceState("conjuration","Conjuration passives","passives",{
+        aRank=a,boundPieces=#pieces,boundWeight=weight,cRank=c,dRank=d,
+        magickaBonus=c == 2 and math.floor(intelligence*0.25)
+            or c == 1 and math.floor(intelligence*0.10) or 0,
+        selectedSpell=selected and selected.id,selectedSummon=selectedSummon,
+        sound=a > 0 and selectedSummon and ({-5,-10,-15,-25})[a] or 0,
+        statPerPiece=each,totals=totals,
+    })
 end
 
 -- Builds the complete B-chain bonus using vanilla magic effects. Applying it
 -- through Core 0's global dynamic-spell service works for temporary summoned
 -- actors that do not accept ordinary target-local events.
 local function applySummonEmpowerment(actor, b)
-    SkillDebug.traceEvent("conjuration", "summon discovered", {
+    local trace=SkillDebug.beginTrace("conjuration","Empowered Servants","new summon discovered",{
         actor = SkillDebug.objectId(actor),
         rank = b,
     })
@@ -286,6 +438,9 @@ local function applySummonEmpowerment(actor, b)
             ignoreSpellAbsorption = true,
             quiet = true,
         })
+        trace:step("empowerment batch queued",{
+            batchFirst=first,batchSize=#batch,totalEffects=#spellEffects,
+        })
     end
 
     debugState.applications = debugState.applications + 1
@@ -297,7 +452,10 @@ local function applySummonEmpowerment(actor, b)
         expectedMaximum = (tonumber(health.base) or 0) + healthBonus,
         duration = duration,
     }
-    SkillDebug.traceEvent("conjuration", "summon empowered", debugState.lastEmpowerment)
+    trace:finish("summon empowerment queued",{
+        duration=duration,effects=#spellEffects,expectedMaximum=debugState.lastEmpowerment.expectedMaximum,
+        healthBase=health.base,healthBonus=healthBonus,percent=percent,
+    })
 end
 
 local function empowerNewSummons()
@@ -318,12 +476,17 @@ local function empowerNewSummons()
             end
         end
     elseif castActors and now >= castExpiresAt then
+        local trace=SkillDebug.beginTrace("conjuration","Summon tracking","tracking window expired",{
+            bRank=b,expiresAt=castExpiresAt,now=now,
+        })
         castActors,summonCast=nil,nil
+        trace:finish("tracking state cleared")
     end
 
 end
 
 local function clear()
+    dismissAllBonusSummons()
     effects.clearAll()
     stats.clearAll()
     castActors,summonCast=nil,nil
@@ -335,6 +498,8 @@ local function onUpdate(dt)
     updateTimer=updateTimer-dt
     if updateTimer > 0 then return end
     updateTimer=0.2
+    captureAddedBonusSummons()
+    pruneExpiredBonusSummons()
     refreshPassives()
     empowerNewSummons()
     previousActorSnapshot = latestActorSnapshot
@@ -364,7 +529,10 @@ local function onConsoleCommand(mode, command)
         .. " source=" .. tostring(trackingSource)
         .. " tracking=" .. tostring(castActors ~= nil)
         .. " discovered=" .. tostring(debugState.discovered)
-        .. " applications=" .. tostring(debugState.applications))
+        .. " applications=" .. tostring(debugState.applications)
+        .. " trackedBonusSpells=" .. tostring(SkillDebug.count(bonusSummonsBySpell))
+        .. " trackedBonusInstances=" .. tostring(trackedBonusSummonCount())
+        .. " pendingCapture=" .. tostring(pendingBonusCapture ~= nil))
 
     local last = debugState.lastEmpowerment
     if not last then
@@ -380,7 +548,7 @@ local function onConsoleCommand(mode, command)
 end
 
 Common.registerMagicPerks("conjuration","Conjuration",ids,{
-    A1={localizedName="Easier Summoning",localizedFlavour="The first footstep across the threshold is always the hardest. You have made it easier.",localizedDescription="-5 Sound while selecting a summon spell; successful summons have a 10% chance to call a second servant.",onAdd=refreshPassives,onRemove=clear},
+    A1={localizedName="Easier Summoning",localizedFlavour="The first footstep across the threshold is always the hardest. You have made it easier.",localizedDescription="-5 Sound while selecting a summon spell; successful summons have a 10% chance to call a second servant. Recasting that spell dismisses its previous bonus servants.",onAdd=refreshPassives,onRemove=clear},
     A2={localizedName="Widened Gate",localizedFlavour="The passage opens wider, and eager claws find room beside one another.",localizedDescription="Sound becomes -10; bonus-summon chance rises to 20%.",onAdd=refreshPassives,onRemove=clear},
     A3={localizedName="Crowded Threshold",localizedFlavour="Your call is no longer an invitation. It is a road.",localizedDescription="Sound becomes -15; bonus-summon chance rises to 30%.",onAdd=refreshPassives,onRemove=clear},
     A4={localizedName="Legion Beyond",localizedFlavour="One name spoken in your voice may return with an army behind it.",localizedDescription="Sound becomes -25; 50% chance for a second summon, then 25% chance for a third.",onAdd=refreshPassives,onRemove=clear},
@@ -395,7 +563,12 @@ Common.registerMagicPerks("conjuration","Conjuration",ids,{
 return {
     engineHandlers={
         onUpdate=onUpdate,
-        onSave=function() return {effects=effects.snapshot(),stats=stats.snapshot()} end,
+        onSave=function()
+            return {
+                effects=effects.snapshot(),stats=stats.snapshot(),
+                bonusSummonsBySpell=bonusSummonsBySpell,
+            }
+        end,
         onLoad=function(data)
             effects.restoreAndReverse(data and data.effects)
             stats.restoreAndReverse(data and data.stats)
@@ -404,6 +577,8 @@ return {
             latestActorSnapshot=actorSnapshot()
             previousActorSnapshot=copySnapshot(latestActorSnapshot)
             trackingSource="none"
+            bonusSummonsBySpell=(data and data.bonusSummonsBySpell) or {}
+            pendingBonusCapture=nil
             debugState={
                 casts=0,discovered=0,applications=0,
                 lastEmpowerment=nil,

@@ -33,8 +33,9 @@ local function countsOf(typeObject)
     return result
 end
 local function duplicate(recordId,count)
-    if not recordId or count <= 0 then return end
+    if not recordId or count <= 0 then return false end
     core.sendGlobalEvent("SPerks_DuplicateItem",{target=self,recordId=recordId,count=count})
+    return true
 end
 
 local SHIELD_MAP={
@@ -47,10 +48,14 @@ local CURE_MAP={
 }
 
 local function applyReaction(effect,a)
-    SkillDebug.traceEvent("alchemy", "Alchemical Reaction check", {
+    local trace = SkillDebug.beginTrace("alchemy", "Alchemical Reaction", "potion effect observed", {
         effect = effect and effect.id,
+        magnitude = effect and effect.magnitudeThisFrame,
         rank = a,
     })
+    if not trace:gate("perk rank is active", a > 0, { rank=a }) then
+        return trace:reject("A chain inactive")
+    end
     local id=effect.id
     local magnitude=math.max(0,tonumber(effect.magnitudeThisFrame) or 0)
     local natural=math.max(1,tonumber(effect.duration) or tonumber(effect.durationLeft) or 1)
@@ -76,19 +81,29 @@ local function applyReaction(effect,a)
         targetId,targetMagnitude=CURE_MAP[id],25
         duration=({900,1800,2700,3600})[a]
     end
-    if not targetId or targetMagnitude <= 0 then return end
+    trace:step("secondary effect calculated", {
+        duration=duration, sourceEffect=id, sourceMagnitude=magnitude,
+        targetEffect=targetId, targetMagnitude=targetMagnitude,
+    })
+    if not targetId or targetMagnitude <= 0 then
+        return trace:reject("source effect has no qualifying reaction")
+    end
     local reactionKey=targetId.."|"..tostring(extra or "")
-    if (reactionExpiry[reactionKey] or 0)>core.getSimulationTime() then return end
+    local now=core.getSimulationTime()
+    if (reactionExpiry[reactionKey] or 0)>now then
+        return trace:reject("matching reaction is still active", {
+            expiresAt=reactionExpiry[reactionKey], now=now, reactionKey=reactionKey,
+        })
+    end
     Common.applyDynamicSpell(self,self,"Alchemical Reaction",{{
         id=targetId,magnitudeMin=targetMagnitude,duration=duration,
         affectedAttribute=effect.affectedAttribute,affectedSkill=effect.affectedSkill,
     }},{ignoreReflect=true,ignoreResistances=true,ignoreSpellAbsorption=true})
-    SkillDebug.traceEvent("alchemy", "Alchemical Reaction applied", {
-        duration = duration,
-        effect = targetId,
-        magnitude = targetMagnitude,
+    reactionExpiry[reactionKey]=now+duration
+    trace:finish("dynamic spell queued", {
+        duration=duration, effect=targetId, expiresAt=reactionExpiry[reactionKey],
+        magnitude=targetMagnitude, reactionKey=reactionKey,
     })
-    reactionExpiry[reactionKey]=core.getSimulationTime()+duration
 end
 
 local INVERT={
@@ -107,11 +122,18 @@ local INVERT={
 }
 
 local function ingredientEffects(spell,b)
+    local trace = SkillDebug.beginTrace("alchemy", "Raw Ingestion", "ingredient effect observed", {
+        activeSpell=spell and spell.activeSpellId,
+        item=spell and SkillDebug.objectId(spell.item),
+        rank=b,
+    })
     local item=spell.item
-    if not item or not types.Ingredient.objectIsInstance(item) then return end
+    if not item or not types.Ingredient.objectIsInstance(item) then
+        return trace:reject("source item is not an ingredient")
+    end
     local record=types.Ingredient.record(item)
     local basis=spell.effects and spell.effects[1]
-    if not basis then return end
+    if not basis then return trace:reject("active ingredient has no basis effect") end
     local magnitude=math.max(1,tonumber(basis.magnitudeThisFrame) or 1)
     local duration=math.max(1,tonumber(basis.duration) or 1)
     local applied=0
@@ -124,6 +146,10 @@ local function ingredientEffects(spell,b)
             if effect.id=="paralyze" then id,value="resistparalysis",100 end
             if effect.id=="silence" then id,value="sound",-100 end
             if id then
+                trace:step("additional ingredient effect accepted", {
+                    harmful=harmful, index=index, sourceEffect=effect.id,
+                    targetEffect=id, value=value,
+                })
                 Common.applyDynamicSpell(self,self,"Raw Ingestion",{{
                     id=id,magnitudeMin=value,duration=duration,
                     affectedAttribute=effect.affectedAttribute,
@@ -131,6 +157,10 @@ local function ingredientEffects(spell,b)
                 }},{ignoreReflect=true,ignoreResistances=true,ignoreSpellAbsorption=true,stackable=true})
                 applied=applied+1
             end
+        elseif index > 1 then
+            trace:step("additional ingredient effect rejected", {
+                harmful=harmful, index=index, rank=b, sourceEffect=effect.id,
+            })
         end
     end
     local firstRecord=core.magic.effects.records[basis.id]
@@ -153,6 +183,10 @@ local function ingredientEffects(spell,b)
     if applied==0 and firstRecord and firstRecord.harmful then
         ui.showMessage("The ingredient's toxicity breaks harmlessly against your practiced constitution.")
     end
+    trace:finish("ingredient processing complete", {
+        applied=applied, basis=basis.id,
+        basisHarmful=firstRecord and firstRecord.harmful,
+    })
 end
 
 local function inspectNewItemEffects()
@@ -177,7 +211,12 @@ local function preserveConsumedPotions()
         local chance=rank("C")==2 and 0.50 or 0.25
         for id,old in pairs(potionSnapshot) do
             for _=1,math.max(0,old-(current[id] or 0)) do
-                if math.random()<chance then duplicate(id,1) end
+                local roll=math.random()
+                local trace=SkillDebug.beginTrace("alchemy","Preserved Dose","potion consumption detected",{
+                    chance=chance, potion=id, roll=roll,
+                })
+                local replaced=roll<chance and duplicate(id,1)
+                trace:finish(replaced and "replacement queued" or "preservation roll failed")
             end
         end
     end
@@ -185,13 +224,17 @@ local function preserveConsumedPotions()
 end
 
 local function onUiModeChanged(data)
-    SkillDebug.traceEvent("alchemy", "UI mode changed", {
+    local trace=SkillDebug.beginTrace("alchemy","Alchemy session","UI mode changed",{
         newMode = data and data.newMode,
         oldMode = data and data.oldMode,
     })
     if data.newMode=="Alchemy" then
         inAlchemy=true
         alchemySession={ingredients=countsOf(types.Ingredient),potions=countsOf(types.Potion)}
+        trace:finish("session snapshot captured",{
+            ingredientRecords=SkillDebug.count(alchemySession.ingredients),
+            potionRecords=SkillDebug.count(alchemySession.potions),
+        })
     elseif data.oldMode=="Alchemy" then
         inAlchemy=false
         local d=rank("D")
@@ -201,17 +244,27 @@ local function onUiModeChanged(data)
             for id,now in pairs(potions) do
                 local produced=math.max(0,now-(alchemySession.potions[id] or 0))
                 local bonus=math.floor(produced*(d==2 and 1 or 0.5))
-                duplicate(id,bonus)
+                local queued=duplicate(id,bonus)
+                trace:step("batch output resolved",{
+                    bonus=bonus, potion=id, produced=produced, queued=queued,
+                })
             end
             local chance=d==2 and 0.35 or 0.20
             for id,before in pairs(alchemySession.ingredients) do
                 for _=1,math.max(0,before-(ingredients[id] or 0)) do
-                    if math.random()<chance then duplicate(id,1) end
+                    local roll=math.random()
+                    local queued=roll<chance and duplicate(id,1)
+                    trace:step("ingredient preservation resolved",{
+                        chance=chance, ingredient=id, queued=queued, roll=roll,
+                    })
                 end
             end
         end
         alchemySession=nil
         potionSnapshot=countsOf(types.Potion)
+        trace:finish("session closed",{dRank=d})
+    else
+        trace:reject("mode change is unrelated to Alchemy")
     end
 end
 

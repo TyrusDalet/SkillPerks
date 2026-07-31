@@ -35,10 +35,20 @@ local function totalCatalogue()
     return count
 end
 local function catalogueItem(trigger,item)
-    if rank("A")==0 or not item or not item:isValid() then return end
+    local trace=SkillDebug.beginTrace("enchant","Enchanter's Codex","enchanted item observed",{
+        item=SkillDebug.objectId(item),trigger=trigger,
+    })
+    if rank("A")==0 then return trace:reject("A chain inactive") end
+    if not item or not item:isValid() then return trace:reject("item unavailable") end
     local enchantment=MagicDetection.getEnchantmentRecord(item)
-    if not enchantment then return end
-    for _,effect in ipairs(enchantment.effects or {}) do catalogue[trigger][effect.id]=true end
+    if not enchantment then return trace:reject("item has no enchantment record") end
+    local before=totalCatalogue()
+    for _,effect in ipairs(enchantment.effects or {}) do
+        local existed=catalogue[trigger][effect.id] == true
+        catalogue[trigger][effect.id]=true
+        trace:step("effect catalogued",{effect=effect.id,existing=existed,trigger=trigger})
+    end
+    trace:finish("catalogue reconciled",{added=totalCatalogue()-before,total=totalCatalogue()})
 end
 
 local function chargedItems()
@@ -60,13 +70,25 @@ end
 
 local function grantCircuit(item)
     local d=rank("D")
-    if d==0 or not item or not item:isValid() then return end
+    local trace=SkillDebug.beginTrace("enchant","Enchanter's Circuit","enchanted item activated",{
+        dRank=d,item=SkillDebug.objectId(item),
+    })
+    if d==0 then return trace:reject("D chain inactive") end
+    if not item or not item:isValid() then return trace:reject("item unavailable") end
     local key=itemKey(item)
     local now=core.getSimulationTime()
-    if stacks[key] then stacks[key]=now+15 return end
+    if stacks[key] then
+        stacks[key]=now+15
+        return trace:finish("existing stack refreshed",{expiresAt=stacks[key],key=key})
+    end
     local count=0
     for _,expiry in pairs(stacks) do if expiry>now then count=count+1 end end
-    if count < (d==2 and 5 or 3) then stacks[key]=now+15 end
+    local cap=d==2 and 5 or 3
+    if count < cap then
+        stacks[key]=now+15
+        return trace:finish("new stack granted",{activeBefore=count,cap=cap,expiresAt=stacks[key]})
+    end
+    trace:reject("stack cap reached",{active=count,cap=cap})
 end
 local function activeCircuitStacks()
     local now,count=core.getSimulationTime(),0
@@ -85,59 +107,91 @@ interfaces.ErnPerkFramework.registerSkillUseHandler({
         local recharge=Common.useType("Enchant_Recharge")
         local item=event.enchantedItem or event.params and event.params.item
             or types.Actor.getSelectedEnchantedItem(self)
+        local trace=SkillDebug.beginTrace("enchant","Enchanted item use","Enchant skill-use event",{
+            item=SkillDebug.objectId(item),useType=use,
+        })
         if use==useItem then
             catalogueItem("CastOnUse",item)
             grantCircuit(item)
+            trace:finish("Cast on Use processed")
         elseif use==strike then
             catalogueItem("CastOnStrike",item)
             if rank("D")>=2 then grantCircuit(item) end
+            trace:finish("Cast on Strike processed",{closedCircuit=rank("D")>=2})
         elseif use==recharge and rank("B")>0 then
             -- Exact soul fields differ across OpenMW/Inventory Extender
             -- versions. The UI charge diff below remains authoritative.
             rechargeBefore=rechargeBefore or chargeSnapshot()
+            trace:finish("recharge snapshot captured",{items=SkillDebug.count(rechargeBefore)})
+        else
+            trace:reject("skill-use type has no active perk route",{
+                bRank=rank("B"),dRank=rank("D"),
+            })
         end
     end,
 })
 
 MagicDetection.newScrollCastTracker(self,function(recordId)
     local c=rank("C")
-    if c>0 and math.random()<(c==2 and 0.50 or 0.25) then
+    local chance=c==2 and 0.50 or 0.25
+    local roll=math.random()
+    local trace=SkillDebug.beginTrace("enchant","Preserved Scroll","scroll cast completed",{
+        cRank=c,chance=chance,recordId=recordId,roll=roll,
+    })
+    if c<=0 then return trace:reject("C chain inactive") end
+    if roll<chance then
         core.sendGlobalEvent("SPerks_DuplicateItem",{
             target=self,recordId=recordId,count=1,reselectAsActive=true,
         })
+        trace:finish("replacement scroll queued")
+    else
+        trace:reject("preservation roll failed")
     end
 end)
 
 local function goldCount() return types.Actor.inventory(self):countOf("gold_001") end
 local function onUiModeChanged(data)
-    SkillDebug.traceEvent("enchant", "UI mode changed", {
+    local trace=SkillDebug.beginTrace("enchant","Enchant UI","UI mode changed",{
         newMode = data and data.newMode,
         oldMode = data and data.oldMode,
     })
     if data.newMode=="Enchanting" then
         selfEnchanting=data.arg==nil
         if data.arg~=nil then serviceGold=goldCount() end
+        trace:finish("enchanting session opened",{
+            selfEnchanting=selfEnchanting,serviceGold=serviceGold,
+        })
     elseif data.oldMode=="Enchanting" then
         if serviceGold and rank("A")>0 then
             local spent=math.max(0,serviceGold-goldCount())
             local percent=math.floor(totalCatalogue()/5)*(rank("A")>=4 and 0.02 or 0.01)
             if spent>0 and percent>0 then
+                local refund=math.floor(spent*percent)
                 core.sendGlobalEvent("SPerks_DuplicateItem",{
-                    target=self,recordId="gold_001",count=math.floor(spent*percent),
+                    target=self,recordId="gold_001",count=refund,
                 })
+                trace:step("service refund queued",{percent=percent,refund=refund,spent=spent})
+            else
+                trace:step("service refund skipped",{percent=percent,spent=spent})
             end
         end
         serviceGold=nil
         selfEnchanting=false
         effects.apply("fortifyskill","enchant",0)
+        trace:finish("enchanting session closed")
     elseif data.newMode=="Recharge" then
         rechargeBefore=chargeSnapshot()
+        trace:finish("recharge snapshot captured",{items=SkillDebug.count(rechargeBefore)})
     elseif data.oldMode=="Recharge" and rechargeBefore and rank("B")>0 then
         local now=chargeSnapshot()
         local added=0
         for key,current in pairs(now) do added=added+math.max(0,current-(rechargeBefore[key] or current)) end
-        reserve=reserve+math.floor(added*(rank("B")==2 and 1 or 0.5))
+        local gained=math.floor(added*(rank("B")==2 and 1 or 0.5))
+        reserve=reserve+gained
         rechargeBefore=nil
+        trace:finish("recharge reserve calculated",{chargeAdded=added,reserveGained=gained,reserveTotal=reserve})
+    else
+        trace:reject("mode change has no Enchant route")
     end
 end
 
@@ -153,19 +207,26 @@ end
 -- resolved effects through a fresh dynamic spell gives A3/A4 a literal free
 -- echo while preventing recursion: the generated spell has no source item.
 local function onMagicEffectLanded(data)
-    SkillDebug.traceEvent("enchant", "magic effect landed", {
+    local trace=SkillDebug.beginTrace("enchant","Echoed Activation","landed magic-effect event",{
         item = data and SkillDebug.objectId(data.item),
         spell = data and data.spellId,
         target = data and SkillDebug.objectId(data.target),
     })
     local a=rank("A")
-    if a<3 or not data or not data.item or not data.target or not data.target:isValid() then return end
+    if a<3 then return trace:reject("A3 is not owned",{aRank=a}) end
+    if not data or not data.item then return trace:reject("effect has no source item") end
+    if not data.target or not data.target:isValid() then return trace:reject("target unavailable") end
     local enchantment=MagicDetection.getEnchantmentRecord(data.item)
-    if not enchantment or enchantment.type~=core.magic.ENCHANTMENT_TYPE.CastOnUse then return end
+    if not enchantment or enchantment.type~=core.magic.ENCHANTMENT_TYPE.CastOnUse then
+        return trace:reject("source is not a Cast on Use enchantment")
+    end
     catalogueItem("CastOnUse",data.item)
     grantCircuit(data.item)
     local chance=math.floor(totalCatalogue()/25)*(a>=4 and 0.02 or 0.01)
-    if chance<=0 or math.random()>=chance then return end
+    local roll=math.random()
+    trace:step("echo chance resolved",{catalogue=totalCatalogue(),chance=chance,roll=roll})
+    if chance<=0 then return trace:reject("catalogue grants no echo chance") end
+    if roll>=chance then return trace:reject("echo roll failed") end
     local echoed={}
     for _,effect in ipairs(data.effects or {}) do
         table.insert(echoed,{
@@ -175,10 +236,12 @@ local function onMagicEffectLanded(data)
         })
     end
     Common.applyDynamicSpell(data.target,self,"Echoed Enchantment",echoed)
+    trace:finish("echo spell queued",{effects=#echoed})
 end
 
 local function distributeReserve()
-    if reserve<1 then return end
+    local trace=SkillDebug.beginTrace("enchant","Charge Reserve","distribution tick",{reserve=reserve})
+    if reserve<1 then return trace:reject("reserve below one charge") end
     local list=chargedItems()
     table.sort(list,function(a,b)
         local ar=types.Actor.getEquipment(self,types.Actor.EQUIPMENT_SLOT.CarriedRight)
@@ -198,8 +261,13 @@ local function distributeReserve()
             local add=math.min(1,missing,reserve)
             types.Item.itemData(entry.item).enchantmentCharge=entry.current+add
             reserve=reserve-add
+            trace:step("charge restored",{
+                amount=add,item=SkillDebug.objectId(entry.item),
+                newCharge=entry.current+add,reserveRemaining=reserve,
+            })
         end
     end
+    trace:finish("distribution complete",{reserveRemaining=reserve})
 end
 
 for _,calculation in ipairs({
@@ -213,7 +281,16 @@ for _,calculation in ipairs({
         priority=700,
         handler=function()
             local count=activeCircuitStacks()
-            return count>0 and 1+count*0.10 or nil
+            local multiplier=count>0 and 1+count*0.10 or nil
+            local trace=SkillDebug.beginTrace("enchant","Enchanter's Circuit","magnitude calculation",{
+                activeStacks=count,calculation=calculation,
+            })
+            if not multiplier then
+                trace:reject("no active circuit stacks")
+                return nil
+            end
+            trace:finish("multiplier returned",{multiplier=multiplier})
+            return multiplier
         end,
     })
 end
@@ -221,8 +298,11 @@ end
 local function refresh()
     catalogueConstantEffects()
     local a=rank("A")
-    effects.apply("fortifyskill","enchant",selfEnchanting and a>=2
-        and totalCatalogue()*(a>=4 and 2 or 1) or 0)
+    local bonus=selfEnchanting and a>=2 and totalCatalogue()*(a>=4 and 2 or 1) or 0
+    effects.apply("fortifyskill","enchant",bonus)
+    SkillDebug.traceState("enchant","Living Catalogue","passive",{
+        aRank=a,bonus=bonus,selfEnchanting=selfEnchanting,totalCatalogue=totalCatalogue(),
+    })
 end
 local function clear()
     effects.clearAll()
