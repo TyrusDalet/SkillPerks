@@ -70,7 +70,8 @@ local function getHeavyArmorInfo()
 end
 
 local aTracker  = StatTracker.newActiveEffectTracker(self) -- A: Feather
-local bTracker  = StatTracker.newStatModTracker(self)       -- B: Fortify Fatigue (dynamic)
+local bTracker  = StatTracker.newStatModTracker(self, "Heavy Armor Iron Constitution")
+local legacyBTracker = StatTracker.newActiveEffectTracker(self)
 local c1Tracker = StatTracker.newActiveEffectTracker(self)    -- C1: flat Resist Normal Weapons
 local c2Tracker = StatTracker.newActiveEffectTracker(self)     -- C2: per-piece Resist Normal Weapons
 local dTracker  = StatTracker.newActiveEffectTracker(self)      -- D: Resist trio (D1) OR Shield trio (D2)
@@ -384,7 +385,14 @@ end
 local function onLoad(data)
     data = data or {}
     aTracker.restoreAndReverse(data.aSnapshot)
-    bTracker.restoreAndReverse(data.bSnapshot)
+    -- B-chain Fatigue used an active Fortify effect in older saves. The old
+    -- flat snapshot must be reversed by an active-effect tracker, while new
+    -- nested snapshots belong to the dynamic-stat tracker.
+    if type(data.bSnapshot) == "table" and data.bSnapshot.dynamic ~= nil then
+        bTracker.restoreAndReverse(data.bSnapshot)
+    else
+        legacyBTracker.restoreAndReverse(data.bSnapshot)
+    end
     c1Tracker.restoreAndReverse(data.c1Snapshot)
     c2Tracker.restoreAndReverse(data.c2Snapshot)
     dTracker.restoreAndReverse(data.dSnapshot)
@@ -401,6 +409,7 @@ local onConsoleCommand = SkillDebug.makeHandler({
     snapshot = function()
         local weight, pieces = getHeavyArmorInfo()
         local weightedAR = getHeavyArmorRating()
+        local fatigue = types.Actor.stats.dynamic.fatigue(self)
         return {
             string.format(
                 "Equipped set: pieces=%s weight=%s weightedAR=%s",
@@ -414,6 +423,17 @@ local onConsoleCommand = SkillDebug.makeHandler({
                 SkillDebug.number(fatigueBeforeSwing),
                 tostring(jumpPending),
                 SkillDebug.number(fatigueBeforeJump)
+            ),
+            string.format(
+                "Fatigue pool: base=%s modifier=%s current=%s maximum=%s expectedIronConstitution=%s",
+                SkillDebug.number(fatigue.base),
+                SkillDebug.number(fatigue.modifier),
+                SkillDebug.number(fatigue.current),
+                SkillDebug.number(fatigue.base + fatigue.modifier),
+                SkillDebug.number(
+                    getBRank() > 0 and pieces >= B_MIN_PIECES
+                        and pieces * B_FATIGUE_PER_PIECE or 0
+                )
             ),
         }
     end,
@@ -477,7 +497,7 @@ interfaces.ErnPerkFramework.registerPerk({
     category = ChainRequirements.category("Combat", "Heavy Armor", 5),
     art = "textures\\levelup\\knight",
     localizedFlavour = "Long hours under steel have taught your lungs patience and your legs refusal. You do not tire quickly, because you cannot afford to.",
-    localizedDescription = "While wearing 3 or more pieces of Heavy Armor, gain Fortify Fatigue "
+    localizedDescription = "While wearing 3 or more pieces of Heavy Armor, gain maximum Fatigue "
         .. "scaling with the number of pieces worn.",
     requirements = ChainRequirements.forSlot(SKILL_ID, ids, "B1"),
     onAdd = updateBFatiguePool,
@@ -490,7 +510,7 @@ interfaces.ErnPerkFramework.registerPerk({
     category = ChainRequirements.category("Combat", "Heavy Armor", 6),
     art = "textures\\levelup\\knight",
     localizedFlavour = "The rhythm of heavy war is measured, brutal, and exact. Every swing spends strength, and every recovery claims some of it back.",
-    localizedDescription = "Effect 1: \n The Fortify Fatigue pool from Iron Constitution is unchanged.\f"
+    localizedDescription = "Effect 1: \n The maximum Fatigue pool from Iron Constitution is unchanged.\f"
         .. "Effect 2: \n Each weapon swing and jump now recovers a portion of the fatigue it costs.",
     requirements = ChainRequirements.forSlot(SKILL_ID, ids, "B2"),
     onAdd = updateBFatiguePool,

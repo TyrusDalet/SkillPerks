@@ -86,11 +86,12 @@ end
 --  Display is handled through ErnPerkFramework's external modifier report.
 -- ============================================================
 
-local aTracker = StatTracker.newStatModTracker(self)       -- A: Fortify Fatigue (dynamic stat)
+local aTracker = StatTracker.newStatModTracker(self, "Athletics Endurance") -- A: maximum Fatigue
 local bTracker = StatTracker.newActiveEffectTracker(self)   -- B: Feather
 local cStatTracker = StatTracker.newStatModTracker(self)    -- C: Fortify Speed
 local cEffectTracker = StatTracker.newActiveEffectTracker(self) -- C: Swift Swim
 local dTracker = StatTracker.newStatModTracker(self)        -- D: Speed stacks + Agility at cap
+local legacyATracker = StatTracker.newActiveEffectTracker(self)
 local legacyCTracker = StatTracker.newActiveEffectTracker(self)
 local legacyDTracker = StatTracker.newActiveEffectTracker(self)
 
@@ -491,6 +492,9 @@ local function onUpdate(dt)
     recalcTimer = recalcTimer - dt
     if recalcTimer <= 0 then
         recalcTimer = RECALC_INTERVAL
+        -- Reconcile the cap independently of perk sync so migrated saves and
+        -- other modifier changes cannot leave the A-chain contribution stale.
+        updateAStats()
         updateBStats()
         updateCStats()
         tickSecondWind()
@@ -511,7 +515,14 @@ end
 
 local function onLoad(data)
     data = data or {}
-    aTracker.restoreAndReverse(data.aSnapshot)
+    -- Older releases stored A-chain Fatigue as a Fortify active effect under
+    -- this same save key. Remove that legacy contribution before rebuilding
+    -- the perk as a real dynamic-stat modifier.
+    if type(data.aSnapshot) == "table" and data.aSnapshot.dynamic ~= nil then
+        aTracker.restoreAndReverse(data.aSnapshot)
+    else
+        legacyATracker.restoreAndReverse(data.aSnapshot)
+    end
     bTracker.restoreAndReverse(data.bSnapshot)
     legacyCTracker.restoreAndReverse(data.cSnapshot)
     legacyDTracker.restoreAndReverse(data.dEffectSnapshot or data.dSnapshot)
@@ -569,8 +580,11 @@ local function onConsoleCommand(mode, command)
         .. " stopTimer=" .. tostring(dStoppedTimer))
     consolePrint("Athletics stats:"
         .. " A=" .. tostring(getARank())
-        .. " fatigue=" .. tostring(fatigue.current)
-        .. "/" .. tostring(maxFatigue)
+        .. " fatigue(base=" .. tostring(fatigue.base)
+        .. " modifier=" .. tostring(fatigue.modifier)
+        .. " current=" .. tostring(fatigue.current)
+        .. " max=" .. tostring(maxFatigue)
+        .. ")"
         .. " regenRate=" .. tostring(regenRate)
         .. " speed(base=" .. tostring(speed.base)
         .. " modifier=" .. tostring(speed.modifier)
@@ -591,7 +605,7 @@ interfaces.ErnPerkFramework.registerPerk({
     category = ChainRequirements.category("Combat", "Athletics", 1),
     art = "textures\\levelup\\knight",
     localizedFlavour = "Every soldier learns the first law of the road: spend your breath wisely, or the road spends you.",
-    localizedDescription = "Fortify Fatigue +5. While moving, slowly regenerate fatigue "
+    localizedDescription = "Maximum Fatigue +5. While moving, slowly regenerate fatigue "
         .. "(1pt every 2 seconds).",
     requirements = ChainRequirements.forSlot(SKILL_ID, ids, "A1"),
     onAdd = updateAStats,
@@ -604,7 +618,7 @@ interfaces.ErnPerkFramework.registerPerk({
     category = ChainRequirements.category("Combat", "Athletics", 2),
     art = "textures\\levelup\\knight",
     localizedFlavour = "Where others slow, chest burning and legs heavy, you find another breath waiting.",
-    localizedDescription = "Fortify Fatigue +10. Fatigue regeneration while moving "
+    localizedDescription = "Maximum Fatigue +10. Fatigue regeneration while moving "
         .. "improves to 1pt per second.",
     requirements = ChainRequirements.forSlot(SKILL_ID, ids, "A2"),
     onAdd = updateAStats,
@@ -617,7 +631,7 @@ interfaces.ErnPerkFramework.registerPerk({
     category = ChainRequirements.category("Combat", "Athletics", 3),
     art = "textures\\levelup\\knight",
     localizedFlavour = "Pain becomes a rhythm, breath becomes a hammer, and your body answers every demand with more.",
-    localizedDescription = "Fortify Fatigue +15. Fatigue regeneration while moving now scales "
+    localizedDescription = "Maximum Fatigue +15. Fatigue regeneration while moving now scales "
         .. "with how depleted you are - 1pt/s at high fatigue, rising to 3pts/s when critically low.",
     requirements = ChainRequirements.forSlot(SKILL_ID, ids, "A3"),
     onAdd = updateAStats,
@@ -630,7 +644,7 @@ interfaces.ErnPerkFramework.registerPerk({
     category = ChainRequirements.category("Combat", "Athletics", 4),
     art = "textures\\levelup\\knight",
     localizedFlavour = "Miles, hills, ash storms, and forced marches blur together; only the next step still matters.",
-    localizedDescription = "Fortify Fatigue +25. Fatigue regeneration while moving now scales "
+    localizedDescription = "Maximum Fatigue +25. Fatigue regeneration while moving now scales "
         .. "up to 5pts/s at critically low fatigue.",
     requirements = ChainRequirements.forSlot(SKILL_ID, ids, "A4"),
     onAdd = updateAStats,

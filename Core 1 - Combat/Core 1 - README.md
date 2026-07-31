@@ -74,7 +74,8 @@ Load those dependencies before `Core 1 SkillPerks.omwscripts`.
   meters; chance scales with the victim's pre-hit Health percentage.
 - **B2 - Panic Harvest:** Demoralize magnitude rises from 20 to 50.
 - **C1 - Berserk Breakpoint:** Once per day, falling below 25% Health triggers
-  ten seconds of Orc Berserk.
+  ten seconds of Orc Berserk: Fortify Health 20, Fortify Fatigue 200,
+  Fortify Attack 100, and Drain Agility 100.
 - **C2 - Controlled Frenzy:** Orc Berserk no longer drains Agility.
 - **D1 - Broken Plate:** Damaged armor provides proportionally less protection
   against Axe damage.
@@ -267,8 +268,9 @@ shields are not required.
   NPCs receive Demoralize Humanoid, ordinary creatures receive Demoralize
   Creature, and undead receive Turn Undead.
 - Berserk Breakpoint grants Fortify Health 20, Fortify Fatigue 200, Fortify
-  Attack 100, and Drain Agility 100 for ten seconds. Controlled Frenzy removes
-  only the Agility penalty. The daily use resets when the in-game day changes.
+  Attack 100, and Drain Agility 100 for ten seconds, mirroring the Orc racial
+  Berserk ability. Controlled Frenzy removes only the Agility penalty. The
+  daily use resets when the in-game day changes.
 - Broken Plate scales each struck armor piece's effective protection by its
   current-condition percentage. No Shelter removes the normal Unarmored armor
   contribution when the Axe strikes an unarmored location.

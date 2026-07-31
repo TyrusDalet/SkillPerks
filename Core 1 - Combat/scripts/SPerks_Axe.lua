@@ -111,6 +111,7 @@ local ARMOR_SLOTS = {
 local CHARGED_THRESHOLD = 0.95
 local DEMORALIZE_RADIUS = 1000 -- 10m in vanilla-scale world units.
 local BERSERK_HEALTH_RATIO = 0.25
+local BERSERK_DURATION = 10
 local DAY_SECONDS = 86400
 
 local berserkDayUsed = nil
@@ -368,16 +369,16 @@ local function triggerBerserkIfNeeded()
     ui.showMessage("Berserk fury takes hold!")
 
     local effects = {
-        { id = "fortifyhealth", range = core.magic.RANGE.Target, magnitudeMin = 20, duration = 10 },
-        { id = "fortifyfatigue", range = core.magic.RANGE.Target, magnitudeMin = 200, duration = 10 },
-        { id = "fortifyattack", range = core.magic.RANGE.Target, magnitudeMin = 100, duration = 10 },
+        { id = "fortifyhealth", range = core.magic.RANGE.Target, magnitudeMin = 20, duration = BERSERK_DURATION },
+        { id = "fortifyfatigue", range = core.magic.RANGE.Target, magnitudeMin = 200, duration = BERSERK_DURATION },
+        { id = "fortifyattack", range = core.magic.RANGE.Target, magnitudeMin = 100, duration = BERSERK_DURATION },
     }
     if rank == 1 then
         table.insert(effects, {
             id = "drainattribute",
             range = core.magic.RANGE.Target,
             magnitudeMin = 100,
-            duration = 10,
+            duration = BERSERK_DURATION,
             affectedAttribute = "agility",
         })
     end
