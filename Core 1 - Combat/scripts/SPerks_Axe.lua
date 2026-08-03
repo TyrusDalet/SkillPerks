@@ -261,6 +261,12 @@ local function applyDemoralize(target, magnitude)
     core.sendGlobalEvent("SPerks_CreateAndApplySpell", {
         target = target,
         caster = self,
+        preferredSpellId = string.format(
+            "SPerks_Axe_Fear_%s_%d",
+            effectId=="demoralizehumanoid" and "Humanoid"
+                or (effectId=="demoralizecreature" and "Creature" or "Undead"),
+            magnitude
+        ),
         spellName = "Terror of the Fallen",
         effects = {
             {
@@ -386,6 +392,7 @@ local function triggerBerserkIfNeeded()
     core.sendGlobalEvent("SPerks_CreateAndApplySpell", {
         target = self,
         caster = self,
+        preferredSpellId = "SPerks_Axe_Berserk_"..tostring(rank),
         spellName = "Orc Berserk",
         effects = effects,
         activeSpellOptions = {

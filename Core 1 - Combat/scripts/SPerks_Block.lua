@@ -45,7 +45,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
     the separate confirmed ngarde_parrySelf PLAYER EVENT - see the D chain
     comment below for the full reasoning on why these need different hooks.
 
-    CROSS-ACTOR WRITES (weapon condition damage, fatigue drain, applying a
+    CROSS-ACTOR WRITES (weapon condition damage, fatigue damage, applying a
     spell to the attacker/caster) are routed through Core 0's shared
     global.lua handlers. Player scripts cannot safely write arbitrary
     actor/item state directly.
@@ -270,10 +270,11 @@ local function tickFatigueSnapshots(dt)
             if entry.attacker:isValid() then
                 local spent = entry.before - types.Actor.stats.dynamic.fatigue(entry.attacker).current
                 if spent > 0 then
-                    core.sendGlobalEvent("SPerks_ModifyActorActiveEffect", {
-                        target = entry.attacker,
-                        effectId = "drainfatigue",
+                    entry.attacker:sendEvent("SPerks_TakeFatigue", {
                         amount = spent,
+                        source = self,
+                        sourceEffect = ids.B2,
+                        context = "block.punishingGuard",
                     })
                 end
             end

@@ -133,12 +133,16 @@ local function isThrustAttack(attack)
     return attack.type == 2 or attack.type == "thrust" or attack.type == "Thrust"
 end
 
-local function modifyAttributeDrain(target, attribute, amount)
-    core.sendGlobalEvent("SPerks_ModifyActorActiveEffect", {
-        target = target,
-        effectId = "drainattribute",
-        extraParam = attribute,
-        amount = amount,
+-- Replaces one perk-owned attribute drain on the target. The target's Core 0
+-- script owns the actual modifier and expiry, avoiding global aggregate writes.
+local function setAttributeDrain(target, key, attribute, amount, duration, sourceEffect)
+    target:sendEvent("SPerks_SetTimedEffectBundle", {
+        caster=self,
+        sourceEffect=sourceEffect,
+        effects={{
+            key=key,id="drainattribute",affectedAttribute=attribute,
+            magnitudeMin=math.max(0,amount or 0),duration=duration or 1,
+        }},
     })
 end
 
@@ -152,6 +156,8 @@ local function applyDamageAttribute(target, attribute, magnitude, duration, spel
     core.sendGlobalEvent("SPerks_CreateAndApplySpell", {
         target = target,
         caster = self,
+        preferredSpellId = attribute=="agility"
+            and "SPerks_Spear_Damage_Agility" or "SPerks_Spear_Damage_Speed",
         spellName = spellName,
         effects = {
             {
@@ -176,6 +182,7 @@ local function applyParalyze(target)
     core.sendGlobalEvent("SPerks_CreateAndApplySpell", {
         target = target,
         caster = self,
+        preferredSpellId = "SPerks_Native_Paralyze_1s",
         spellName = "Pinned Nerve",
         effects = {
             {
@@ -217,7 +224,7 @@ local function removeAgilityStacksForKey(key)
         return
     end
     if entry.target and entry.target:isValid() and entry.stacks > 0 then
-        modifyAttributeDrain(entry.target, "agility", -(entry.stacks * entry.magnitude))
+        setAttributeDrain(entry.target,"SkillPerks_SpearPinning","agility",0,1,ids.A1)
     end
     agilityStacksByTarget[key] = nil
 end
@@ -249,9 +256,10 @@ local function handlePinningPoint(target)
 
     if entry.stacks < A_MAX_STACKS[rank] then
         entry.stacks = entry.stacks + 1
-        modifyAttributeDrain(target, "agility", magnitude)
     end
     entry.timer = A_STACK_TIMER
+    setAttributeDrain(target,"SkillPerks_SpearPinning","agility",
+        entry.stacks*entry.magnitude,entry.timer,ids.A1)
 end
 
 local function tickAgilityStacks(dt)
@@ -316,11 +324,15 @@ local function removeOneSpeedStack(key, index)
         return
     end
     local stack = table.remove(entry.stacks, index)
-    if stack and entry.target and entry.target:isValid() then
-        modifyAttributeDrain(entry.target, "speed", -D_SPEED_MAGNITUDE)
-    end
+    local target=entry.target
     if #entry.stacks == 0 then
         speedStacksByTarget[key] = nil
+    end
+    if stack and target and target:isValid() then
+        local remaining=0
+        for _,state in ipairs(entry.stacks) do remaining=math.max(remaining,state.timer or 0) end
+        setAttributeDrain(target,"SkillPerks_SpearHamstring","speed",
+            #entry.stacks*D_SPEED_MAGNITUDE,math.max(remaining,0.01),ids.D1)
     end
 end
 
@@ -340,7 +352,8 @@ local function addSpeedStack(target)
     end
 
     table.insert(entry.stacks, { timer = D_STACK_TIMER })
-    modifyAttributeDrain(target, "speed", D_SPEED_MAGNITUDE)
+    setAttributeDrain(target,"SkillPerks_SpearHamstring","speed",
+        #entry.stacks*D_SPEED_MAGNITUDE,D_STACK_TIMER,ids.D1)
 
     if getDRank() >= 2 then
         applyDamageAttribute(target, "speed", 5, 2, "Hamstringing Point")
@@ -438,12 +451,38 @@ local function onSave()
     return {
         agilityStacksByTarget = serializeAgilityStacks(),
         speedStacksByTarget = serializeSpeedStacks(),
+        targetTimedEffects = true,
     }
 end
 
 local function onLoad(data)
     agilityStacksByTarget = data and data.agilityStacksByTarget or {}
     speedStacksByTarget = data and data.speedStacksByTarget or {}
+    if not data or data.targetTimedEffects==true then return end
+    for _,entry in pairs(agilityStacksByTarget) do
+        if entry.target and entry.target:isValid() and entry.stacks and entry.stacks>0 then
+            local amount=entry.stacks*(entry.magnitude or 0)
+            core.sendGlobalEvent("SPerks_ModifyActorActiveEffect",{
+                target=entry.target,effectId="drainattribute",
+                extraParam="agility",amount=-amount,
+            })
+            setAttributeDrain(entry.target,"SkillPerks_SpearPinning","agility",
+                amount,entry.timer or A_STACK_TIMER,ids.A1)
+        end
+    end
+    for _,entry in pairs(speedStacksByTarget) do
+        if entry.target and entry.target:isValid() and entry.stacks and #entry.stacks>0 then
+            local amount=#entry.stacks*D_SPEED_MAGNITUDE
+            local remaining=0
+            for _,state in ipairs(entry.stacks) do remaining=math.max(remaining,state.timer or 0) end
+            core.sendGlobalEvent("SPerks_ModifyActorActiveEffect",{
+                target=entry.target,effectId="drainattribute",
+                extraParam="speed",amount=-amount,
+            })
+            setAttributeDrain(entry.target,"SkillPerks_SpearHamstring","speed",
+                amount,math.max(remaining,0.01),ids.D1)
+        end
+    end
 end
 
 -- Reports the target-local stack maps used by the Spear A and D chains.

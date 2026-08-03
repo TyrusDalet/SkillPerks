@@ -331,16 +331,19 @@ local D_PARALYZE_DURATION = 10
 
 local dStacksByTarget = {}
 
--- Applies or reverses one stack of Blind, Sound, and Burden on the target.
-local function modifyDStackEffects(target, stacks)
-    local amount = D_STACK_MAGNITUDE * stacks
-    for _, effectId in ipairs({ "blind", "sound", "burden" }) do
-        core.sendGlobalEvent("SPerks_ModifyActorActiveEffect", {
-            target = target,
-            effectId = effectId,
-            amount = amount,
-        })
-    end
+-- Replaces the target-local total for Blind, Sound, and Burden. Core 0 owns
+-- expiry and exact reversal; this file only owns the gameplay stack count.
+local function setDStackEffects(target, stacks, duration)
+    local amount = D_STACK_MAGNITUDE * math.max(0,stacks or 0)
+    target:sendEvent("SPerks_SetTimedEffectBundle", {
+        caster=self,
+        sourceEffect=ids.D1,
+        effects={
+            {key="SkillPerks_BluntRelentless:blind",id="blind",magnitudeMin=amount,duration=duration or D_STACK_TIMER},
+            {key="SkillPerks_BluntRelentless:sound",id="sound",magnitudeMin=amount,duration=duration or D_STACK_TIMER},
+            {key="SkillPerks_BluntRelentless:burden",id="burden",magnitudeMin=amount,duration=duration or D_STACK_TIMER},
+        },
+    })
 end
 
 local function removeDStacksForKey(key)
@@ -349,7 +352,7 @@ local function removeDStacksForKey(key)
         return
     end
     if entry.target and entry.target:isValid() and entry.stacks > 0 then
-        modifyDStackEffects(entry.target, -entry.stacks)
+        setDStackEffects(entry.target,0)
     end
     dStacksByTarget[key] = nil
 end
@@ -358,6 +361,7 @@ local function applyDParalysis(target)
     core.sendGlobalEvent("SPerks_CreateAndApplySpell", {
         target = target,
         caster = self,
+        preferredSpellId = "SPerks_Native_Paralyze_10s",
         spellName = "Relentless Assault",
         effects = {
             {
@@ -393,9 +397,9 @@ local function handleRelentlessAssault(target)
     local maxStacks = D_MAX_STACKS[rank]
     if entry.stacks < maxStacks then
         entry.stacks = entry.stacks + 1
-        modifyDStackEffects(target, 1)
     end
     entry.timer = D_STACK_TIMER
+    setDStackEffects(target,entry.stacks,entry.timer)
 
     if rank >= 2 and entry.stacks >= D_MAX_STACKS[2] then
         removeDStacksForKey(key)
@@ -492,6 +496,7 @@ end
 local function onSave()
     return {
         dStacksByTarget = serializeDStacks(),
+        targetTimedEffects = true,
     }
 end
 
@@ -500,6 +505,7 @@ local function onLoad(data)
     if not data or not data.dStacksByTarget then
         return
     end
+    local migrated=data.targetTimedEffects==true
     for key, entry in pairs(data.dStacksByTarget) do
         if entry.target and entry.target:isValid() and entry.stacks and entry.stacks > 0 then
             dStacksByTarget[key] = {
@@ -507,6 +513,18 @@ local function onLoad(data)
                 stacks = entry.stacks,
                 timer = entry.timer or D_STACK_TIMER,
             }
+            if not migrated then
+                -- Old builds stored these as aggregate global active effects.
+                -- Reverse that exact legacy contribution once, then hand the
+                -- remaining duration to the actor-local manager.
+                local amount=D_STACK_MAGNITUDE*entry.stacks
+                for _,effectId in ipairs({"blind","sound","burden"}) do
+                    core.sendGlobalEvent("SPerks_ModifyActorActiveEffect",{
+                        target=entry.target,effectId=effectId,amount=-amount,
+                    })
+                end
+                setDStackEffects(entry.target,entry.stacks,entry.timer or D_STACK_TIMER)
+            end
         end
     end
 end
