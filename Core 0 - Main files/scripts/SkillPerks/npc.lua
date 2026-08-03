@@ -239,5 +239,7 @@ return {
     eventHandlers = magicHandlers,
     engineHandlers = {
         onUpdate = onUpdate,
+        onSave = MagicTarget.onSave,
+        onLoad = MagicTarget.onLoad,
     },
 }

@@ -31,13 +31,11 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
     SPerks_CreateAndApplySpell
         world.createRecord is global-only, so any perk needing to apply a
-        dynamically-computed magnitude/duration spell effect (rather than
-        a fixed-magnitude one that could live in the ESP) must round-trip
-        through here. Builds a Spells.createRecordDraft from a caller-
-        supplied effect list, registers it, and applies it to the target
-        via activeSpells:add. Covers: Alteration D (Kinetic Shell elemental
-        discharge), Illusion D (Total Devotion's dynamic Command
-        magnitude), and any future perk with the same shape.
+        dynamically-computed effect with native resistance, reflection,
+        absorption, AI, or other spell semantics must round-trip through
+        here. Simple modifiers and resource changes use target-local Core 0
+        services instead. Exact matching native definitions reuse a cached
+        record rather than permanently registering one record per proc.
 
     SPerks_DuplicateItem
         world.createObject is global-only. Creates N of a record and moves
@@ -62,8 +60,8 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
     SPerks_ModifyActorActiveEffect
         Actor.activeEffects writes are global/self-scoped. Applies a flat
-        active effect delta to an arbitrary actor. Covers: Block B2 and
-        future cross-actor buff/debuff effects.
+        active effect delta to an arbitrary actor. Retained for one-time
+        cleanup of saves made before target-local timed effects were added.
 
     SPerks_ApplyExistingSpell
         Applies an already-existing spell id to a target actor. Unlike
@@ -72,7 +70,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
     Security activation bridge
         Records exact lock/trap targets for the player Security script and
-        synchronously intercepts Master Locksmith's empty-hand activation.
+        synchronously intercepts Master Locksmith's locked-object activation.
         Rolls return here to weaken a lock after a D2 failure or to unlock and
         activate it after a success, in the context where those writes are legal.
 
@@ -103,6 +101,7 @@ local types = require("openmw.types")
 local securityMasteryRanks = {}
 local spellforgeCastWindows = {}
 local spellforgeCleanupTimer = 0
+local dynamicRecordCache = {}
 
 local function playerKey(player)
     return player and tostring(player.id) or nil
@@ -221,8 +220,9 @@ local function onUpdate(dt)
     end
 end
 
---- Records whether a player currently owns Master Locksmith.
---- @param data table { player = GameObject, rank = number }
+--- Records Master Locksmith rank and rest-limited use count so exhausted
+--- activations can fall through to vanilla instead of being consumed.
+--- @param data table { player = GameObject, rank = number, uses = number }
 local function setSecurityMasteryRank(data)
     data = data or {}
     local key = playerKey(data.player)
@@ -230,12 +230,15 @@ local function setSecurityMasteryRank(data)
         return
     end
     local rank = math.max(0, math.floor(tonumber(data.rank) or 0))
-    securityMasteryRanks[key] = rank > 0 and rank or nil
+    securityMasteryRanks[key] = rank > 0 and {
+        rank = rank,
+        uses = math.max(0, math.floor(tonumber(data.uses) or 0)),
+    } or nil
 end
 
 -- Every lockable activation is reported to the player's Security script so
--- tool wear can be matched to the exact lock or trap. An eligible empty-hand
--- activation is consumed here because Activation handlers must decide
+-- tool wear can be matched to the exact lock or trap. An eligible Master
+-- Locksmith activation is consumed here because Activation handlers must decide
 -- synchronously whether vanilla activation should continue.
 local function onSecurityLockableActivated(target, actor)
     if not actor or not types.Player.objectIsInstance(actor)
@@ -250,17 +253,18 @@ local function onSecurityLockableActivated(target, actor)
         lockLevel = types.Lockable.getLockLevel(target),
     })
 
-    local rank = securityMasteryRanks[playerKey(actor)] or 0
-    if rank == 0 or not types.Lockable.isLocked(target) then
+    local mastery = securityMasteryRanks[playerKey(actor)]
+    local rank = mastery and mastery.rank or 0
+    local cap = rank >= 2 and 2 or 1
+    if rank == 0 or (mastery.uses or 0) >= cap
+            or not types.Lockable.isLocked(target) then
         return true
     end
 
-    local held = types.Actor.getEquipment(actor, types.Actor.EQUIPMENT_SLOT.CarriedRight)
-    if held ~= nil then
-        return true
-    end
-
-    actor:sendEvent("SPerks_SecurityBareHandAttempt", {
+    -- Reserve the use synchronously so repeated activation cannot queue more
+    -- attempts before the player script reports its updated state.
+    mastery.uses = (mastery.uses or 0) + 1
+    actor:sendEvent("SPerks_SecurityMasterLocksmithAttempt", {
         target = target,
         lockLevel = types.Lockable.getLockLevel(target),
         rank = rank,
@@ -271,7 +275,7 @@ end
 -- Resolves the result in global context, where lock state can be changed.
 -- Success opens the lock; a D2 failure leaves it locked but permanently lowers
 -- its level by 25%, giving the player's next attempt an easier mechanism.
-local function resolveSecurityBareHandAttempt(data)
+local function resolveSecurityMasterLocksmithAttempt(data)
     data = data or {}
     local target = data.target
     local player = data.player
@@ -427,6 +431,24 @@ local function dynamicEffectSignature(effects)
     return table.concat(identities, ";")
 end
 
+--- Identifies an exact reusable spell-record definition. Unlike the
+--- non-stacking signature above, magnitude and duration belong here because
+--- they are immutable fields of the underlying world record.
+local function dynamicRecordSignature(data)
+    local parts = { tostring(data.spellName or "SkillPerks Effect") }
+    for _, effect in ipairs(data.effects or {}) do
+        parts[#parts + 1] = table.concat({
+            dynamicEffectIdentity(effect),
+            tostring(effect.range or core.magic.RANGE.Target),
+            tostring(effect.magnitudeMin),
+            tostring(effect.magnitudeMax or effect.magnitudeMin),
+            tostring(effect.duration),
+            tostring(effect.area),
+        }, "|")
+    end
+    return table.concat(parts, ";")
+end
+
 --- Compares optional caster handles across local/global script boundaries.
 --- OpenMW can expose different userdata wrappers for the same actor, while
 --- the GameObject id remains stable.
@@ -553,40 +575,49 @@ local function createAndApplySpell(data)
         table.insert(effectIndices, i - 1)
     end
 
-    -- Uniqueness: simulation time + a random component, same style as the
-    -- design doc's own "SPerks_Illusion_D_Command_" .. tostring(core.getSimulationTime())
-    -- example. Dynamically created records are never reused/cached - each
-    -- discharge/application gets its own throwaway record.
-    local draftId = "SPerks_Dynamic_" .. tostring(core.getSimulationTime()) .. "_" .. tostring(math.random(1, 999999))
-
-    local draftOk, draft = pcall(core.magic.spells.createRecordDraft, {
-        id = draftId,
-        name = data.spellName or "SkillPerks Effect",
-        type = core.magic.SPELL_TYPE.Spell,
-        cost = 0,
-        isAutocalc = false,
-        alwaysSucceedFlag = true,
-        effects = draftEffects,
-    })
-    if not draftOk then
-        reportSpellApplication(data, {
-            requestId = data.requestId,
-            success = false,
-            stage = "create-draft",
-            error = tostring(draft),
-        })
-        return
+    -- Fixed native effects can name an ESP record. Until that record exists,
+    -- development builds retain the dynamic fallback so Lua remains testable
+    -- while the plugin is being authored.
+    local preferredId=data.preferredSpellId
+    local newSpell=preferredId and core.magic.spells.records[preferredId] or nil
+    local recordSignature = dynamicRecordSignature(data)
+    local cachedId = dynamicRecordCache[recordSignature]
+    if newSpell==nil then
+        newSpell=cachedId and core.magic.spells.records[cachedId] or nil
     end
-
-    local recordOk, newSpell = pcall(world.createRecord, draft)
-    if not recordOk or newSpell == nil or newSpell.id == nil then
-        reportSpellApplication(data, {
-            requestId = data.requestId,
-            success = false,
-            stage = "create-record",
-            error = recordOk and "world.createRecord returned no spell id" or tostring(newSpell),
+    if newSpell == nil then
+        local draftId = "SPerks_Dynamic_" .. tostring(core.getSimulationTime()) .. "_" .. tostring(math.random(1, 999999))
+        local draftOk, draft = pcall(core.magic.spells.createRecordDraft, {
+            id = draftId,
+            name = data.spellName or "SkillPerks Effect",
+            type = core.magic.SPELL_TYPE.Spell,
+            cost = 0,
+            isAutocalc = false,
+            alwaysSucceedFlag = true,
+            effects = draftEffects,
         })
-        return
+        if not draftOk then
+            reportSpellApplication(data, {
+                requestId = data.requestId,
+                success = false,
+                stage = "create-draft",
+                error = tostring(draft),
+            })
+            return
+        end
+
+        local recordOk
+        recordOk, newSpell = pcall(world.createRecord, draft)
+        if not recordOk or newSpell == nil or newSpell.id == nil then
+            reportSpellApplication(data, {
+                requestId = data.requestId,
+                success = false,
+                stage = "create-record",
+                error = recordOk and "world.createRecord returned no spell id" or tostring(newSpell),
+            })
+            return
+        end
+        dynamicRecordCache[recordSignature] = newSpell.id
     end
 
     local addOk, addError = pcall(function()
@@ -604,7 +635,16 @@ local function createAndApplySpell(data)
     local activeOk, active = pcall(function()
         return activeSpells:isSpellActive(newSpell.id)
     end)
-    local success = addOk and activeOk and active == true
+    local requiresActiveVerification=false
+    for _,effect in ipairs(data.effects) do
+        local effectRecord=core.magic.effects.records[effect.id]
+        if not effectRecord or effectRecord.isAppliedOnce~=true then
+            requiresActiveVerification=true
+            break
+        end
+    end
+    local success=addOk and (not requiresActiveVerification or (activeOk and active==true))
+    local successStage=requiresActiveVerification and "active" or "applied-once"
     reportSpellApplication(data, {
         requestId = data.requestId,
         target = data.target,
@@ -614,7 +654,7 @@ local function createAndApplySpell(data)
         effectId = data.effects[1] and data.effects[1].id or nil,
         success = success,
         active = activeOk and active or false,
-        stage = success and "active" or (addOk and "verify-active" or "add-active-spell"),
+        stage = success and successStage or (addOk and "verify-active" or "add-active-spell"),
         error = not addOk and tostring(addError)
             or (not activeOk and tostring(active) or nil),
     })
@@ -631,21 +671,53 @@ end
 ---   reselectAsActive = boolean|nil (if true, the new item is immediately
 ---     set as the target's selected enchanted item - used by Enchant C so
 ---     a preserved scroll doesn't need to be manually re-equipped),
+---   resultTarget = GameObject|nil, resultEvent = string|nil,
+---   requestId = string|nil (optional asynchronous acknowledgement fields),
 --- }
+local function reportItemDuplication(data,result)
+    local recipient=data and data.resultTarget
+    if recipient and recipient:isValid() and data.resultEvent then
+        result.requestId=data.requestId
+        result.recordId=data.recordId
+        result.requestedCount=data.count or 1
+        recipient:sendEvent(data.resultEvent,result)
+    end
+end
+
 local function duplicateItem(data)
+    data=data or {}
     if not data.target or not data.target:isValid() then
+        reportItemDuplication(data,{success=false,stage="validate-target",error="target unavailable"})
         return
     end
     if not data.recordId then
+        reportItemDuplication(data,{success=false,stage="validate-record",error="record id missing"})
         return
     end
 
-    local newItem = world.createObject(data.recordId, data.count or 1)
-    newItem:moveInto(types.Actor.inventory(data.target))
+    local created,newItem=pcall(world.createObject,data.recordId,data.count or 1)
+    if not created or not newItem then
+        reportItemDuplication(data,{
+            success=false,stage="create-object",error=created and "no object returned" or tostring(newItem),
+        })
+        return
+    end
+    local moved,moveError=pcall(function()
+        newItem:moveInto(types.Actor.inventory(data.target))
+    end)
+    if not moved then
+        reportItemDuplication(data,{success=false,stage="move-into-inventory",error=tostring(moveError)})
+        return
+    end
 
     if data.reselectAsActive then
-        types.Actor.setSelectedEnchantedItem(data.target, newItem)
+        local selected,selectError=pcall(types.Actor.setSelectedEnchantedItem,data.target,newItem)
+        if not selected then
+            reportItemDuplication(data,{success=false,stage="reselect-item",error=tostring(selectError)})
+            return
+        end
     end
+    reportItemDuplication(data,{success=true,stage="delivered",deliveredCount=data.count or 1})
 end
 
 -- ============================================================
@@ -764,7 +836,9 @@ return {
         SPerks_ModifyActorActiveEffect = modifyActorActiveEffect,
         SPerks_ApplyExistingSpell = applyExistingSpell,
         SPerks_SetSecurityMasteryRank = setSecurityMasteryRank,
-        SPerks_ResolveSecurityBareHandAttempt = resolveSecurityBareHandAttempt,
+        SPerks_ResolveSecurityMasterLocksmithAttempt = resolveSecurityMasterLocksmithAttempt,
+        -- Legacy alias for Core 2 builds from before the interaction rename.
+        SPerks_ResolveSecurityBareHandAttempt = resolveSecurityMasterLocksmithAttempt,
         SPerks_ModifyNpcSkill = modifyNpcSkill,
         SPerks_ModifyNpcDisposition = modifyNpcDisposition,
         SPerks_ModifyNpcBarterGold = modifyNpcBarterGold,
@@ -788,5 +862,11 @@ return {
     },
     engineHandlers = {
         onUpdate=onUpdate,
+        onSave=function()
+            return { dynamicRecordCache=dynamicRecordCache }
+        end,
+        onLoad=function(data)
+            dynamicRecordCache=(data and data.dynamicRecordCache) or {}
+        end,
     },
 }

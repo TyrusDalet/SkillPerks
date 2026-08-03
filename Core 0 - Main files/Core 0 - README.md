@@ -46,14 +46,15 @@ Every SkillPerks skill contains ten slots:
 ```text
 A1 (25) -> A2 (50) -> A3 (75) -> A4 (100)
 B1 (50) -> B2 (100)
-A4 -> C1 (75) -> C2 (100)
-  \-> D1 (75) -> D2 (100)
+A3 -> C1 (75) --+-> C2 (100)
+  \-> D1 (75) --+-> D2 (100)
+             A4 -+
 ```
 
 The number in parentheses is the required base skill value. C and D are
-mutually exclusive mastery branches. Although C1 and D1 use the 75 skill tier,
-they also require A4 and therefore cannot be acquired before reaching 100 in
-the relevant skill.
+mutually exclusive specialisation branches. C1 or D1 becomes available after
+A3 at skill 75. Its final upgrade still requires both the first branch perk and
+A4, so C2 and D2 remain mastery perks.
 
 Temporary skill bonuses do not satisfy acquisition requirements.
 

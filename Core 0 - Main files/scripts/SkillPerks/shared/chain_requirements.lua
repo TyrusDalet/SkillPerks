@@ -23,13 +23,14 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
         A1 (25) -> A2 (50) -> A3 (75) -> A4 (100)
         B1 (50) -> B2 (100)
-        A4 -> C1 (75) / D1 (75)  <- mutually exclusive
-        C1 -> C2 (100) / D1 -> D2 (100)
+        A3 -> C1 (75) / D1 (75)  <- mutually exclusive
+        A4 + C1 -> C2 (100) / A4 + D1 -> D2 (100)
 
     Rather than hand-write this prerequisite chain for every skill,
     ChainRequirements.forSlot() builds it once from a skill id and a table of
-    that skill's own perk ids. A4 is the shared branch point, matching the
-    constellation route shown by every authored skill symbol.
+    that skill's own perk ids. A3 opens the mutually exclusive branches, while
+    A4 rejoins the chosen branch before its final perk. This is the Option 2
+    route shown by every authored SkillPerks constellation.
 
     Exclusivity is implemented the same way FactionPerks' dummy.lua demo
     perks 11-13 already demonstrate (invert(hasPerk(other))), not some new
@@ -51,8 +52,8 @@ local settings = require("scripts.SkillPerks.Settings.settings")
 
 local ChainRequirements = {}
 
--- Skill level required to unlock each slot. The A4 prerequisite makes the C
--- and D branches effectively mastery choices even though their own tier is 75.
+-- Skill level required to unlock each slot. C1 and D1 open alongside A3 at
+-- skill 75; their final upgrades still require A4 and mastery-level skill.
 local SLOT_LEVEL = {
     A1 = 25, A2 = 50, A3 = 75, A4 = 100,
     B1 = 50, B2 = 100,
@@ -106,9 +107,9 @@ local function chainPathReachable(perkIds, slot)
     elseif slot == "B2" then
         return hasPerk(perkIds.B1)
     elseif slot == "C1" then
-        return hasPerk(perkIds.A4) and not hasPerk(perkIds.D1)
+        return hasPerk(perkIds.A3) and not hasPerk(perkIds.D1)
     elseif slot == "D1" then
-        return hasPerk(perkIds.A4) and not hasPerk(perkIds.C1)
+        return hasPerk(perkIds.A3) and not hasPerk(perkIds.C1)
     elseif slot == "C2" then
         return hasPerk(perkIds.A4) and hasPerk(perkIds.C1)
     elseif slot == "D2" then
@@ -200,7 +201,7 @@ function ChainRequirements.forSlot(skillId, perkIds, slot)
     elseif slot == "B2" then
         table.insert(reqs, R.hasPerk(perkIds.B1))
     elseif slot == "C1" then
-        table.insert(reqs, R.hasPerk(perkIds.A4))
+        table.insert(reqs, R.hasPerk(perkIds.A3))
         -- Mutually exclusive with D1. If the skill has no D chain at all
         -- (shouldn't happen given the framework, but guard anyway),
         -- perkIds.D1 being nil would make hasPerk() error, so only add
@@ -209,7 +210,7 @@ function ChainRequirements.forSlot(skillId, perkIds, slot)
             table.insert(reqs, R.invert(R.hasPerk(perkIds.D1)))
         end
     elseif slot == "D1" then
-        table.insert(reqs, R.hasPerk(perkIds.A4))
+        table.insert(reqs, R.hasPerk(perkIds.A3))
         if perkIds.C1 then
             table.insert(reqs, R.invert(R.hasPerk(perkIds.C1)))
         end

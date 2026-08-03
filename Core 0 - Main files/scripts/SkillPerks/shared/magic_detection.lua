@@ -43,6 +43,27 @@ local interfaces = require("openmw.interfaces")
 
 local MagicDetection = {}
 
+--- Reads an actor's documented lowercase base record id without allowing an
+--- unavailable GameObject handle to interrupt spell polling.
+--- @param actor GameObject|nil
+--- @return string|nil recordId
+local function actorRecordId(actor)
+    if actor == nil then return nil end
+    local fieldOk, fieldId = pcall(function() return actor.recordId end)
+    if fieldOk and fieldId ~= nil then
+        return tostring(fieldId):lower()
+    end
+    return nil
+end
+
+--- Recognizes the unique player record. ActiveSpell may expose that record
+--- through either a Player or NPC wrapper, but both retain recordId `player`.
+--- @param actor GameObject|nil
+--- @return boolean isPlayer
+function MagicDetection.isPlayerActor(actor)
+    return actorRecordId(actor)=="player"
+end
+
 --- Resolves either a spell record or record ID to a live spell record.
 --- Generated records, including Spellforge helpers, resolve through the same
 --- database as vanilla and player-created spells.
@@ -81,7 +102,8 @@ end
 --- secondary effects.
 function MagicDetection.isPlayerCastActiveSpell(actor, activeSpell)
     if actor == nil or activeSpell == nil or activeSpell.item ~= nil
-            or activeSpell.caster ~= actor then
+            or not MagicDetection.isPlayerActor(actor)
+            or not MagicDetection.isPlayerActor(activeSpell.caster) then
         return false
     end
     local record = spellRecord(activeSpell.id)
@@ -110,12 +132,18 @@ function MagicDetection.describeActiveSpellSource(actor, activeSpell)
         local ok,result=pcall(shared.isSpellforgeSpellAuthorized,record.id)
         authorized=ok and result==true
     end
+    local casterMatches=MagicDetection.isPlayerActor(actor)
+        and MagicDetection.isPlayerActor(activeSpell and activeSpell.caster or nil)
     return {
         id = activeSpell and activeSpell.id or nil,
         name = activeSpell and activeSpell.name or nil,
         activeSpellId = activeSpell and activeSpell.activeSpellId or nil,
         caster = activeSpell and activeSpell.caster or nil,
-        casterIsActor = activeSpell ~= nil and activeSpell.caster == actor,
+        casterIsActor = casterMatches,
+        casterMatchReason = casterMatches and "caster record is player"
+            or "caster record is not player",
+        casterRecordId = actorRecordId(activeSpell and activeSpell.caster or nil),
+        actorRecordId = actorRecordId(actor),
         item = activeSpell and activeSpell.item or nil,
         recordFound = record ~= nil,
         recordType = record and record.type or nil,
