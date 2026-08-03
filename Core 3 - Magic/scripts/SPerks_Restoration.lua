@@ -233,9 +233,11 @@ interfaces.ErnPerkFramework.registerSkillUseHandler({
     end,
 })
 
-local function playerRestorePerSecond(resource)
-    local id = "restore" .. resource
-    local total = 0
+--- Scans active magic once for both Ward resources. This remains a frame-level
+--- poll because continuous healing must stop Ward decay immediately, but it
+--- avoids traversing the ActiveSpells collection separately for each resource.
+local function playerRestoreRates()
+    local rates = {health=0,fatigue=0}
     local now = core.getSimulationTime()
     for _, spell in pairs(types.Actor.activeSpells(self)) do
         local spellId = tostring(spell.id or "")
@@ -243,7 +245,9 @@ local function playerRestorePerSecond(resource)
             or (spellforgeAuthorized[spellId] or 0) >= now
         local instantHandled = (spellforgeInstantHandled[spellId] or 0) >= now
         for _, effect in pairs(spell.effects or {}) do
-            if effect.id == id then
+            local resource = effect.id == "restorehealth" and "health"
+                or effect.id == "restorefatigue" and "fatigue" or nil
+            if resource then
                 local source = MagicDetection.describeActiveSpellSource(self, spell)
                 source.spellforgeAuthorized = (spellforgeAuthorized[spellId] or 0) >= now
                 source.spellforgeInstantHandled = instantHandled
@@ -251,26 +255,33 @@ local function playerRestorePerSecond(resource)
                 source.magnitude = effect.magnitudeThisFrame
                 source.duration = effect.duration
                 source.durationLeft = effect.durationLeft
+                source.qualifies = qualifies
                 debugState.lastRestoreEffect = source
                 if qualifies and not instantHandled then
-                    total = total + math.max(0, tonumber(effect.magnitudeThisFrame) or 0)
+                    rates[resource] = rates[resource]
+                        + math.max(0, tonumber(effect.magnitudeThisFrame) or 0)
                 end
             end
         end
     end
-    SkillDebug.traceState("restoration","Ward restore-source poll","restore-source-"..resource,{
+    SkillDebug.traceState("restoration","Ward restore-source poll","restore-source",{
         activeSpell=debugState.lastRestoreEffect and debugState.lastRestoreEffect.activeSpellId,
         qualifies=debugState.lastRestoreEffect and debugState.lastRestoreEffect.qualifies,
-        resource=resource,totalPerSecond=total,
+        fatiguePerSecond=rates.fatigue,
+        healthPerSecond=rates.health,
     })
-    return total
+    return rates
 end
 
 -- Restoration overflow has no direct engine callback, so this short poll
 -- measures the full player-cast restore rate against the missing resource.
 local function collectOverflow(dt)
-    for _, resource in ipairs({"health","fatigue"}) do
-        local rate = playerRestorePerSecond(resource)
+    local a=rank("A")
+    if a<=0 then return end
+    local rates=playerRestoreRates()
+    local resources=a>=3 and {"health","fatigue"} or {"health"}
+    for _, resource in ipairs(resources) do
+        local rate = rates[resource]
         if rate > 0 and cap(resource) > 0 then
             local stat = types.Actor.stats.dynamic[resource](self)
             local missing = math.max(0, maximum(resource) - stat.current)
@@ -491,16 +502,23 @@ interfaces.ErnPerkFramework.registerOnHitHandler({
             end
             local absorbed = tonumber(resolvedAttack.skillPerksRestorationWardAbsorbedHealth) or 0
             if rank("D") >= 2 and absorbed > 0 then
-                table.insert(reflected,{
-                    id="damagehealth",
-                    magnitudeMin=absorbed,
-                    duration=1,
+                attack.attacker:sendEvent("SPerks_TakeDamage",{
+                    amount=absorbed,source=self,
+                    sourceEffect=ids.D2,damageType="wardingreprisal",
+                })
+                trace:step("absorbed ward damage returned directly",{
+                    amount=absorbed,target=SkillDebug.objectId(attack.attacker),
                 })
             end
             if #reflected > 0 then
                 Common.applyDynamicSpell(attack.attacker,self,"Warding Reprisal",reflected)
                 return trace:finish("reprisal spell queued",{
                     absorbedHealth=absorbed,effects=#reflected,
+                })
+            end
+            if absorbed>0 then
+                return trace:finish("direct ward reprisal delivered",{
+                    absorbedHealth=absorbed,effects=0,
                 })
             end
             trace:reject("no reflected or absorbed damage qualified",{absorbedHealth=absorbed})
@@ -570,6 +588,9 @@ local function onConsoleCommand(mode, command)
             .. " activeId=" .. tostring(active.activeSpellId)
             .. " caster=" .. tostring(active.caster)
             .. " casterIsPlayer=" .. tostring(active.casterIsActor)
+            .. " casterMatch=" .. tostring(active.casterMatchReason)
+            .. " casterRecord=" .. tostring(active.casterRecordId)
+            .. " playerRecord=" .. tostring(active.actorRecordId)
             .. " item=" .. tostring(active.item)
             .. " recordFound=" .. tostring(active.recordFound)
             .. " recordType=" .. tostring(active.recordType)

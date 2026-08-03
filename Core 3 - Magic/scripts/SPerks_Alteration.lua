@@ -29,24 +29,44 @@ local previousFatigue = types.Actor.stats.dynamic.fatigue(self).current
 local wasJumpPressed = false
 local jumpRefundPending = nil
 local lastFatigueReduction = nil
+local pairingDiagnostics = {}
+local lastCounterweight = "No Burden rider has been attempted."
 
 local REFUND_DELAY = 0.1
 local MOVEMENT_FATIGUE_REDUCTION = 0.50
 local JUMP_SAMPLE_DELAY = 0.15
+local PAIRING_POLL_INTERVAL = 0.5
 
 local function rank(chain) return Common.rank(ids, chain) end
+
+--- Returns the Burden effect carried by a spell record or active spell.
+--- @param spell table|nil
+--- @return table|nil effect
+local function burdenEffect(spell)
+    for _,effect in pairs(spell and spell.effects or {}) do
+        if effect.id=="burden" then return effect end
+    end
+    return nil
+end
 
 -- A-chain pairings remain active only for the lifetime of the corresponding
 -- player-cast Alteration effect, so consumables cannot enable them.
 local function refreshPairedEffects()
     local a = rank("A")
-    local swift = a >= 1 and Common.playerSpellEffectMagnitude(self, "swiftswim") or 0
-    local breathing = a >= 1 and Common.playerSpellEffectMagnitude(self, "waterbreathing") or 0
-    local jump = a >= 2 and Common.playerSpellEffectMagnitude(self, "jump") or 0
-    local feather = a >= 3 and Common.playerSpellEffectMagnitude(self, "feather") or 0
+    local snapshot={}
+    local diagnostics={qualifyingSpells=0,scannedSpells=0}
+    if a>0 then
+        snapshot,diagnostics=Common.playerSpellEffectSnapshot(self,{
+            "swiftswim","waterbreathing","jump","feather","levitate",
+        })
+    end
+    local swift = a >= 1 and snapshot.swiftswim.magnitude or 0
+    local breathing = a >= 1 and snapshot.waterbreathing.present or false
+    local jump = a >= 2 and snapshot.jump.magnitude or 0
+    local feather = a >= 3 and snapshot.feather.magnitude or 0
     local burden = math.max(0, Common.getEffectMagnitude(self, "burden"))
-    local levitate = a >= 4 and Common.playerSpellEffectMagnitude(self, "levitate") or 0
-    local nightEyeBonus = breathing > 0 and 10 or 0
+    local levitate = a >= 4 and snapshot.levitate.magnitude or 0
+    local nightEyeBonus = breathing and 25 or 0
     local featherBonus = feather > 0 and math.min(feather, burden) or 0
     local paralysisResist = levitate > 0 and 100 or 0
 
@@ -55,14 +75,45 @@ local function refreshPairedEffects()
     effects.apply("nighteye", nil, nightEyeBonus)
     effects.apply("feather", nil, featherBonus)
     effects.apply("resistparalysis", nil, paralysisResist)
+    pairingDiagnostics={
+        breathing=breathing,feather=feather,featherBonus=featherBonus,
+        jump=jump,levitate=levitate,nightEyeBonus=nightEyeBonus,
+        paralysisResist=paralysisResist,swift=swift,
+        qualifyingSpells=diagnostics.qualifyingSpells,
+        scannedSpells=diagnostics.scannedSpells,
+    }
     SkillDebug.traceState("alteration","Alteration pairings","paired-effects",{
-        aRank=a, breathing=breathing,
+        aRank=a, waterBreathing=breathing,
         effortlessSwimming=effortlessSwimmingActive,
         feather=feather, featherBonus=featherBonus, jump=jump,
         lightStep=lightStepActive,
         levitate=levitate, nightEyeBonus=nightEyeBonus,
         paralysisResist=paralysisResist, swiftSwim=swift,
+        qualifyingSpells=diagnostics.qualifyingSpells,
+        scannedSpells=diagnostics.scannedSpells,
     })
+end
+
+--- Describes every active Water Breathing spell, including rejected sources,
+--- so `luaalt debug` can distinguish detection failures from rider failures.
+local function waterBreathingSourceSummary()
+    local summaries={}
+    for _,spell in pairs(types.Actor.activeSpells(self)) do
+        for _,effect in pairs(spell.effects or {}) do
+            if effect.id=="waterbreathing" then
+                local source=Common.describeActiveSpellSource(self,spell)
+                summaries[#summaries+1]=string.format(
+                    "spell=%s caster=%s casterMatches=%s item=%s known=%s spellforge=%s authorized=%s qualifies=%s",
+                    tostring(source.id),SkillDebug.objectId(source.caster),
+                    tostring(source.casterIsActor),SkillDebug.objectId(source.item),
+                    tostring(source.known),tostring(source.spellforge),
+                    tostring(source.spellforgeAuthorized),tostring(source.qualifies)
+                )
+            end
+        end
+    end
+    return #summaries>0 and table.concat(summaries,"; ")
+        or "no active Water Breathing spell found"
 end
 
 --- Returns whether the player is actively swimming rather than merely
@@ -168,6 +219,18 @@ interfaces.ErnPerkFramework.registerSkillUseHandler({
     skill = "alteration",
     playerCastOnly = true,
     handler = function(event)
+        local spell=event and event.spell
+        if rank("A")>=3 and spell and burdenEffect(spell) then
+            lastCounterweight=string.format(
+                "Burden cast observed: spell=%s; awaiting target-local landing.",
+                tostring(spell.id)
+            )
+            SkillDebug.traceEvent("alteration","Counterweight cast observed",{
+                detection="Core 0 target-local active-spell bridge",
+                spell=spell.id,
+            })
+        end
+
         local b = rank("B")
         local trace=SkillDebug.beginTrace("alteration","Reduced Casting Cost","Alteration skill-use event",{
             bRank=b,cost=event and event.cost,spell=event and event.spell and event.spell.id,
@@ -272,7 +335,44 @@ local function updatePendingRefund(dt)
     })
 end
 
+--- Sends one observed Burden landing to the target-authoritative acceptance
+--- gate shared with the generic landed-spell route.
+--- @param target GameObject
+--- @param effect table Burden active effect.
+--- @param source string Diagnostic detection route.
+local function requestCounterweight(target,effect,source)
+    local duration=math.max(
+        1,
+        tonumber(effect.durationLeft) or tonumber(effect.duration) or 1
+    )
+    local burdenMagnitude=tonumber(effect.magnitudeThisFrame)
+        or tonumber(effect.magnitude)
+        or tonumber(effect.maxMagnitude)
+        or tonumber(effect.minMagnitude)
+        or 1
+    local magnitude=math.max(1,math.floor(burdenMagnitude*0.5))
+    target:sendEvent("SPerks_AlterationSetCounterweight",{
+        amount=magnitude,caster=self,duration=duration,
+        expiresAt=core.getSimulationTime()+duration,
+    })
+    lastCounterweight=string.format(
+        "Acceptance requested via %s: target=%s burden=%s drain=%s duration=%ss.",
+        tostring(source),SkillDebug.objectId(target),
+        SkillDebug.number(burdenMagnitude),SkillDebug.number(magnitude),
+        SkillDebug.number(duration)
+    )
+    SkillDebug.traceEvent("alteration","Counterweight landing observed",{
+        burdenMagnitude=burdenMagnitude,detection=source,duration=duration,
+        expectedDrain=magnitude,target=SkillDebug.objectId(target),
+    })
+end
+
 local function onSpellLanded(data)
+    lastCounterweight=string.format(
+        "Target-local Burden landing received: spell=%s target=%s.",
+        tostring(data and data.spellId),
+        data and SkillDebug.objectId(data.target) or "nil"
+    )
     local trace=SkillDebug.beginTrace("alteration","Crushing Burden","landed magic-effect event",{
         spell = data and data.spellId,
         target = data and SkillDebug.objectId(data.target),
@@ -287,18 +387,10 @@ local function onSpellLanded(data)
     end
     for _, effect in ipairs(data.effects or {}) do
         if effect.id == "burden" then
-            local duration = math.max(1, tonumber(effect.duration) or 1)
-            local magnitude=math.max(1, math.floor((tonumber(effect.magnitude) or 1) * 0.25))
-            trace:step("Burden rider calculated",{
-                burdenMagnitude=effect.magnitude,duration=math.min(10,duration),
-                strengthDrain=magnitude,
+            requestCounterweight(data.target,effect,"generic landed-spell bridge")
+            return trace:finish("Counterweight acceptance requested",{
+                target=SkillDebug.objectId(data.target),
             })
-            Common.applyDynamicSpell(data.target, self, "Crushing Burden", {{
-                id="drainattribute", affectedAttribute="strength",
-                magnitudeMin=magnitude,
-                duration=math.min(10, duration),
-            }})
-            return trace:finish("Crushing Burden queued")
         end
     end
     trace:reject("landed spell contains no Burden effect")
@@ -310,10 +402,6 @@ local SHIELDS = {
     frostshield = "frostdamage",
     lightningshield = "shockdamage",
 }
-
-local function qualifyingShieldMagnitude(effectId)
-    return math.max(0, Common.playerSpellEffectMagnitude(self, effectId))
-end
 
 local function accrueForce(attack)
     local trace=SkillDebug.beginTrace("alteration","Kinetic Shell storage","incoming hit",{
@@ -328,8 +416,14 @@ local function accrueForce(attack)
     local lost = math.max(0, tonumber(attack.damage.health) or 0)
     if lost <= 0 then return trace:reject("hit dealt no Health damage") end
     local totalGain=0
+    local shieldEffects,shieldDiagnostics=Common.playerSpellEffectSnapshot(self,{
+        "shield","fireshield","frostshield","lightningshield",
+    })
     for effectId in pairs(SHIELDS) do
-        local magnitude = qualifyingShieldMagnitude(effectId)
+        local magnitude=math.max(
+            0,
+            shieldEffects[effectId] and shieldEffects[effectId].magnitude or 0
+        )
         if magnitude > 0 then
             local gain = math.floor(lost * magnitude / 100) * 2
             pools[effectId] = math.min(magnitude, pools[effectId] + gain)
@@ -340,8 +434,14 @@ local function accrueForce(attack)
             })
         end
     end
-    if totalGain<=0 then return trace:reject("no qualifying player-cast Shield effect") end
-    trace:finish("force stored",{totalGain=totalGain})
+    if totalGain<=0 then
+        return trace:reject("no qualifying player-cast Shield effect",shieldDiagnostics)
+    end
+    trace:finish("force stored",{
+        totalGain=totalGain,
+        qualifyingSpells=shieldDiagnostics.qualifyingSpells,
+        scannedSpells=shieldDiagnostics.scannedSpells,
+    })
 end
 
 local function dischargeForce(attack)
@@ -414,15 +514,35 @@ local function clear()
     wasJumpPressed = false
     jumpRefundPending = nil
     lastFatigueReduction = nil
+    pairingDiagnostics = {}
     pools, expiry = {shield=0,fireshield=0,frostshield=0,lightningshield=0}, {}
     pendingRefund = nil
+end
+
+--- Records the target-local Counterweight result. Core 0 applies and owns the
+--- timed Strength modifier directly, so no permanent dynamic spell record is
+--- created for this rider.
+--- @param data table|nil Accepted target, magnitude, and duration.
+local function applyAcceptedCounterweight(data)
+    local target=data and data.target
+    if not target or not target:isValid() then
+        lastCounterweight="Acceptance failed: target is unavailable."
+        return
+    end
+    local amount=math.max(1,math.floor(tonumber(data.amount) or 1))
+    local duration=math.max(1,tonumber(data.duration) or 1)
+    lastCounterweight=string.format(
+        "Direct modifier applied: target=%s Drain Strength=%s duration=%ss.",
+        SkillDebug.objectId(target),SkillDebug.number(amount),
+        SkillDebug.number(duration)
+    )
 end
 
 local function onUpdate(dt)
     updatePendingRefund(dt)
     updateTimer = updateTimer - dt
     if updateTimer <= 0 then
-        updateTimer = 0.2
+        updateTimer = PAIRING_POLL_INTERVAL
         refresh()
         local now = core.getSimulationTime()
         for id, endsAt in pairs(expiry) do
@@ -455,6 +575,22 @@ local onConsoleCommand = SkillDebug.makeHandler({
                 tostring(jumpRefundPending ~= nil),
                 SkillDebug.number(MOVEMENT_FATIGUE_REDUCTION)
             ),
+            string.format(
+                "Active pairings: SwiftSwim=%s WaterBreathing=%s NightEyeBonus=%s Jump=%s Feather=%s FeatherBonus=%s Levitate=%s ParalysisResist=%s spells=%s/%s",
+                SkillDebug.number(pairingDiagnostics.swift),
+                tostring(pairingDiagnostics.breathing == true),
+                SkillDebug.number(pairingDiagnostics.nightEyeBonus),
+                SkillDebug.number(pairingDiagnostics.jump),
+                SkillDebug.number(pairingDiagnostics.feather),
+                SkillDebug.number(pairingDiagnostics.featherBonus),
+                SkillDebug.number(pairingDiagnostics.levitate),
+                SkillDebug.number(pairingDiagnostics.paralysisResist),
+                SkillDebug.number(pairingDiagnostics.qualifyingSpells),
+                SkillDebug.number(pairingDiagnostics.scannedSpells)
+            ),
+            "Water Breathing source: "..waterBreathingSourceSummary(),
+            "Last Counterweight: "..lastCounterweight,
+            "Counterweight detection: Core 0 observes only the actor actually carrying Burden.",
             lastFatigueReduction and string.format(
                 "Last Fatigue reduction: kind=%s spent=%s requested=%s resolved=%s observed=%s",
                 tostring(lastFatigueReduction.kind),
@@ -477,9 +613,9 @@ local onConsoleCommand = SkillDebug.makeHandler({
 })
 
 Common.registerMagicPerks("alteration", "Alteration", ids, {
-    A1={localizedName="Effortless Casting",localizedFlavour="Water yields to the mage who has stopped struggling against it.",localizedDescription="While player-cast Swift Swim is active, swimming costs 50% less Fatigue. Player-cast Water Breathing also grants 10 Night-Eye.",onAdd=refresh,onRemove=clear},
+    A1={localizedName="Effortless Casting",localizedFlavour="Water yields to the mage who has stopped struggling against it.",localizedDescription="While player-cast Swift Swim is active, swimming costs 50% less Fatigue. Player-cast Water Breathing also grants 25 Night-Eye.",onAdd=refresh,onRemove=clear},
     A2={localizedName="Light Step",localizedFlavour="The earth receives you gently because you have learned how little of yourself to give it.",localizedDescription="While player-cast Jump is active, jumping costs 50% less Fatigue.",onAdd=refresh,onRemove=clear},
-    A3={localizedName="Counterweight",localizedFlavour="Weight is only an argument between forces, and you have learned to answer.",localizedDescription="Player-cast Feather negates equal Burden; Burden cast on others also briefly drains Strength.",onAdd=refresh,onRemove=clear},
+    A3={localizedName="Counterweight",localizedFlavour="Weight is only an argument between forces, and you have learned to answer.",localizedDescription="Player-cast Feather negates equal Burden. Burden cast on another actor also applies non-stacking Drain Strength equal to half its magnitude for the same duration.",onAdd=refresh,onRemove=clear},
     A4={localizedName="Unbound Motion",localizedFlavour="Once the ground has released you, no lesser force may command your limbs.",localizedDescription="Player-cast Levitate grants complete Paralysis immunity.",onAdd=refresh,onRemove=clear},
     B1={localizedName="Reduced Casting Cost",localizedFlavour="The practiced hand wastes no magicka proving what it already knows.",localizedDescription="Refund up to 15% of Alteration spell cost after other refunds; casts costing under 10 after reduction become free.",onRemove=clear},
     B2={localizedName="Second Nature",localizedFlavour="Utility becomes instinct, and instinct asks no payment for ordinary miracles.",localizedDescription="Refund rises to 30%; casts costing under 25 after reduction become free. Combined refunds cannot exceed the spell's cost.",onRemove=clear},
@@ -490,7 +626,10 @@ Common.registerMagicPerks("alteration", "Alteration", ids, {
 })
 
 return {
-    eventHandlers={ SPerks_MagicEffectLanded=onSpellLanded },
+    eventHandlers={
+        SPerks_AlterationBurdenLanded=onSpellLanded,
+        SPerks_AlterationCounterweightAccepted=applyAcceptedCounterweight,
+    },
     engineHandlers={
         onConsoleCommand=onConsoleCommand,
         onUpdate=onUpdate,
@@ -512,6 +651,7 @@ return {
             wasJumpPressed = false
             jumpRefundPending = nil
             lastFatigueReduction = nil
+            pairingDiagnostics = {}
             pools=(data and data.pools) or {shield=0,fireshield=0,frostshield=0,lightningshield=0}
             expiry=(data and data.expiry) or {}
         end,

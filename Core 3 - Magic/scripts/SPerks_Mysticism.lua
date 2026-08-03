@@ -245,20 +245,13 @@ return {
             if not data or not data.target or not data.target:isValid() then
                 return trace:reject("accepted tether target is unavailable")
             end
-            local magnitude=math.max(1,tonumber(data.magnitude) or 1)
-            local duration=math.max(1,tonumber(data.duration) or 1)
-            local queued=Common.applyDynamicSpell(data.target,self,"Soul Tether",{{
-                id="absorbmagicka",magnitudeMin=magnitude,duration=duration,
-            }},{
-                ignoreReflect=true,
-                ignoreResistances=true,
-                ignoreSpellAbsorption=true,
-                stackable=false,
+            trace:finish("target-local Magicka transfer started",{
+                duration=math.max(1,tonumber(data.duration) or 1),
+                magnitude=math.max(1,tonumber(data.magnitude) or 1),
             })
-            trace:finish(queued and "single Absorb Magicka spell queued"
-                or "dynamic spell request rejected",{
-                    duration=duration,magnitude=magnitude,
-                })
+        end,
+        SPerks_MysticismTetherTick = function(data)
+            Common.restoreResource(self,"magicka",data and data.amount or 0,ids.B1)
         end,
         SPerks_MysticismSoulTetherBurst = function(data)
             Common.restoreResource(self, "magicka", data and data.amount or 0, ids.B2)

@@ -36,6 +36,16 @@ local function damage(target,resource,amount,effectId,damageType)
     return true
 end
 
+--- Applies permanent attribute/skill damage in the target's own script
+--- context instead of creating a one-use world spell record.
+local function directStatDamage(target,effect,sourceEffect)
+    target:sendEvent("SPerks_ApplyTimedEffectBundle",{
+        caster=self,effects={effect},
+        key="SkillPerks_DestructionDirect:"..tostring(core.getSimulationTime()),
+        sourceEffect=sourceEffect,stackable=true,
+    })
+end
+
 interfaces.ErnPerkFramework.registerSkillUseHandler({
     id="SkillPerks_destruction_cast_cost",skill="destruction",playerCastOnly=true,
     handler=function(event)
@@ -155,9 +165,15 @@ local function onSpellLanded(data)
                     amount=bonus,queued=queued,ratio=ratio,resource=resource,
                 })
             elseif id=="drainattribute" then
-                Common.applyDynamicSpell(target,self,"Drain Mastery",{{id="damageattribute",affectedAttribute=effect.affectedAttribute,magnitudeMin=magnitude*ratio,duration=1}})
+                directStatDamage(target,{
+                    id="damageattribute",affectedAttribute=effect.affectedAttribute,
+                    magnitudeMin=magnitude*ratio,duration=1,
+                },ids["A"..a])
             elseif id=="drainskill" then
-                Common.applyDynamicSpell(target,self,"Drain Mastery",{{id="damageskill",affectedSkill=effect.affectedSkill,magnitudeMin=magnitude*ratio,duration=1}})
+                directStatDamage(target,{
+                    id="damageskill",affectedSkill=effect.affectedSkill,
+                    magnitudeMin=magnitude*ratio,duration=1,
+                },ids["A"..a])
             end
             if b>0 and (playerCast or c>=2) then
                 target:sendEvent("SPerks_DestructionSetDrainKill",{
@@ -189,7 +205,8 @@ local function onSpellLanded(data)
                 local queued=damage(target,"fatigue",amount,ids["B"..b],"frost")
                 trace:step("Frost consequence queued",{amount=amount,queued=queued})
                 if d>=2 and playerCast and targetRatio(target,"fatigue")<0.25 then
-                    Common.applyDynamicSpell(target,self,"Frozen Finish",{{id="paralyze",magnitudeMin=1,duration=1}})
+                    Common.applyDynamicSpell(target,self,"Frozen Finish",{{id="paralyze",magnitudeMin=1,duration=1}},
+                        {preferredSpellId="SPerks_Native_Paralyze_1s"})
                     trace:step("Frozen Finish queued")
                 end
             elseif id=="shockdamage" then

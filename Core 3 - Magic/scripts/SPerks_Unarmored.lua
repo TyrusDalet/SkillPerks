@@ -127,7 +127,7 @@ interfaces.ErnPerkFramework.registerCalculationHandler({
 local function updateCastingSpeed()
     local speed = 1
     local b = rank("B")
-    if b > 0 and mostlyUnarmored() then speed = b == 2 and 1.50 or 1.25 end
+    if b > 0 and mostlyUnarmored() then speed = b == 2 and 2.00 or 1.50 end
     pcall(animation.setSpeed, self, "spellcast", speed)
     SkillDebug.traceState("unarmored","Unburdened Casting","casting-speed",{
         bRank=b,emptySlots=emptySlots(),mostlyUnarmored=mostlyUnarmored(),speed=speed,
@@ -173,8 +173,8 @@ Common.registerMagicPerks("unarmored", "Unarmored", ids, {
     A2={localizedName="Unencumbered Form",localizedFlavour="Every discarded plate leaves another channel open to your will.",localizedDescription="Each empty armor slot now grants -3 Sound and +2 Shield.",onAdd=refreshPassives,onRemove=clear},
     A3={localizedName="Ninefold Guard",localizedFlavour="There is no gap in armor that was never worn.",localizedDescription="Each empty armor slot now grants -5 Sound and +3 Shield.",onAdd=refreshPassives,onRemove=clear},
     A4={localizedName="Living Aegis",localizedFlavour="Flesh, breath, and spell become the only armor worth trusting.",localizedDescription="Each empty armor slot now grants -5 Sound and +5 Shield.",onAdd=refreshPassives,onRemove=clear},
-    B1={localizedName="Unburdened Casting",localizedFlavour="Without iron dragging at the gesture, magic answers before thought is finished.",localizedDescription="While mostly unarmored, spellcasting animations are 25% faster.",onRemove=clear},
-    B2={localizedName="Thought Before Motion",localizedFlavour="The spell is already formed when lesser mages begin to raise their hands.",localizedDescription="While mostly unarmored, spellcasting animations are 50% faster.",onRemove=clear},
+    B1={localizedName="Unburdened Casting",localizedFlavour="Without iron dragging at the gesture, magic answers before thought is finished.",localizedDescription="While mostly unarmored, spellcasting animations are 50% faster.",onRemove=clear},
+    B2={localizedName="Thought Before Motion",localizedFlavour="The spell is already formed when lesser mages begin to raise their hands.",localizedDescription="While mostly unarmored, spellcasting animations are 100% faster.",onRemove=clear},
     C1={localizedName="Focused Flesh",localizedFlavour="Bare skin teaches hostile magic that you are not undefended, merely unafraid.",localizedDescription="Each empty armor slot grants 4% Resist Magicka.",onAdd=refreshPassives,onRemove=clear},
     C2={localizedName="Soul-Sheathed",localizedFlavour="Your body does not merely resist sorcery. It drinks from the blow.",localizedDescription="Each empty armor slot additionally grants 2.5% Spell Absorption.",onAdd=refreshPassives,onRemove=clear},
     D1={localizedName="Body as Focus",localizedFlavour="Pain strikes the body and is carried away through motion, breath, and exhaustion.",localizedDescription="While completely unarmored and above 25% Fatigue, convert 75% of incoming Health damage into Fatigue damage.",onRemove=clear},

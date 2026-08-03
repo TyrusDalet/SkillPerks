@@ -65,6 +65,42 @@ function Common.getEffectMagnitude(actor, effectId, extraParam)
     return ok and effect and tonumber(effect.magnitude) or 0
 end
 
+--- Collects several qualifying player-cast effects in one active-spell pass.
+--- School scripts should use this when they need multiple effect values at
+--- once; repeatedly traversing OpenMW's live ActiveSpells collection during
+--- the same update is both expensive and unsafe while spells are changing.
+--- @param actor GameObject
+--- @param effectIds table Array of lowercase magic-effect IDs.
+--- @return table effects Values keyed by effect ID.
+--- @return table diagnostics Numbers of live and qualifying spells inspected.
+function Common.playerSpellEffectSnapshot(actor,effectIds)
+    local requested={}
+    local result={}
+    for _,effectId in ipairs(effectIds or {}) do
+        effectId=tostring(effectId):lower()
+        requested[effectId]=true
+        result[effectId]={magnitude=0,present=false}
+    end
+
+    local diagnostics={qualifyingSpells=0,scannedSpells=0}
+    for _,spell in pairs(types.Actor.activeSpells(actor)) do
+        diagnostics.scannedSpells=diagnostics.scannedSpells+1
+        if MagicDetection.isPlayerCastActiveSpell(actor,spell) then
+            diagnostics.qualifyingSpells=diagnostics.qualifyingSpells+1
+            for _,effect in pairs(spell.effects or {}) do
+                local effectId=tostring(effect.id or ""):lower()
+                local state=requested[effectId] and result[effectId] or nil
+                if state then
+                    state.present=true
+                    state.magnitude=state.magnitude
+                        +(tonumber(effect.magnitudeThisFrame) or 0)
+                end
+            end
+        end
+    end
+    return result,diagnostics
+end
+
 function Common.playerSpellEffectMagnitude(actor, effectId, extraParam)
     local total = 0
     for _, spell in pairs(types.Actor.activeSpells(actor)) do
@@ -82,8 +118,27 @@ function Common.playerSpellEffectMagnitude(actor, effectId, extraParam)
     return total
 end
 
-function Common.hasPlayerSpellEffect(actor, effectId)
-    return Common.playerSpellEffectMagnitude(actor, effectId) ~= 0
+--- Tests for a qualifying player-cast effect by presence rather than numeric
+--- magnitude. Effects such as Water Breathing have no magnitude and therefore
+--- legitimately report zero even while active.
+--- @param actor GameObject Actor whose active spells are inspected.
+--- @param effectId string Magic effect id.
+--- @param extraParam string|nil Optional affected attribute or skill.
+--- @return boolean active
+function Common.hasPlayerSpellEffect(actor, effectId, extraParam)
+    for _, spell in pairs(types.Actor.activeSpells(actor)) do
+        if MagicDetection.isPlayerCastActiveSpell(actor, spell) then
+            for _, effect in pairs(spell.effects or {}) do
+                if effect.id == effectId
+                        and (extraParam == nil
+                            or effect.affectedAttribute == extraParam
+                            or effect.affectedSkill == extraParam) then
+                    return true
+                end
+            end
+        end
+    end
+    return false
 end
 
 --- Shared source policy for school scripts handling target-landed effects.
@@ -95,6 +150,11 @@ end
 --- Shared source policy for school scripts polling the player's active magic.
 function Common.isPlayerCastActiveSpell(actor, activeSpell)
     return MagicDetection.isPlayerCastActiveSpell(actor, activeSpell)
+end
+
+--- Exposes the shared source decision for school-specific diagnostics.
+function Common.describeActiveSpellSource(actor, activeSpell)
+    return MagicDetection.describeActiveSpellSource(actor, activeSpell)
 end
 
 --- Cast-window helper for selected spells that have not landed yet.
@@ -150,6 +210,7 @@ function Common.applyDynamicSpell(target, caster, name, effects, options)
         caster = caster,
         spellName = name,
         effects = effects,
+        preferredSpellId = options.preferredSpellId,
         activeSpellOptions = options,
         requestId = requestId,
         resultTarget = traced and caster or nil,
@@ -157,7 +218,7 @@ function Common.applyDynamicSpell(target, caster, name, effects, options)
         traceSkill = traceSkill,
         traceEffect = name,
     })
-    return true
+    return true,requestId
 end
 
 function Common.effectIndexList(spell, predicate)

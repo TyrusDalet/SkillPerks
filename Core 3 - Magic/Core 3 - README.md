@@ -50,12 +50,14 @@ Spellforge lifecycle information when installed.
   beneficial counterparts instead of merely being discarded.
 - **C1 - Preserved Dose:** Drinking a potion has a 25% chance to replace it.
 - **C2 - Lasting Vintage:** Replacement chance rises to 50%.
-- **D1 - Efficient Preparation:** Brewing produces 50% bonus potions; consumed
-  ingredients each have a 20% preservation chance. Whole bonus potions and
-  preserved ingredients are returned when the Alchemy window closes.
-- **D2 - Master's Batch:** Brewing output doubles and each consumed ingredient
-  has a 35% preservation chance. The additional output is returned when the
-  Alchemy window closes.
+- **D1 - Efficient Preparation:** Brewing produces 50% bonus potions; every
+  consumed ingredient has an independent 20% preservation chance.
+- **D2 - Master's Batch:** Brewing output doubles; every consumed ingredient
+  has an independent 35% preservation chance.
+
+Whole bonus potions and successful ingredient refunds are returned after the
+Alchemy window closes. A message reports the number of extra potions and lists
+the names and quantities of all refunded ingredients.
 
 #### Alchemical Reaction Details
 
@@ -66,12 +68,14 @@ current reaction is still active.
 
 - Restore Health, Magicka, or Fatigue creates Fortify Health, Magicka, or
   Fatigue. Its magnitude is the source magnitude multiplied by its natural
-  duration and the current A-chain percentage.
+  duration and the current A-chain percentage, rounded up.
 - Restore Attribute creates Fortify Attribute using the same calculation.
 - Fortify Health, Magicka, or Fatigue creates a matching Restore effect. Its
-  per-second magnitude is the source magnitude multiplied by the current
-  A-chain percentage, divided by the reaction's duration.
-- Fortify Attribute creates Restore Attribute using the same calculation.
+  per-second magnitude is the higher of source magnitude and duration divided
+  by the lower value, multiplied by the current A-chain percentage, and rounded
+  up. The Restore lasts for the potion effect's natural duration.
+- Fortify Attribute creates a one-time Restore Attribute effect using the
+  source magnitude multiplied by the current A-chain percentage, rounded up.
 - Resist Fire, Frost, and Shock create Fire, Frost, and Lightning Shield.
 - Resist Poison and Resist Magicka create Shield.
 - Cure Common Disease, Cure Blight Disease, and Cure Poison create 25 points
@@ -86,6 +90,7 @@ Universal Antidote uses the following harmful-to-beneficial conversions:
   Fortify effect.
 - Damage Attribute, Health, Magicka, Fatigue, or Skill becomes the matching
   Restore effect.
+- Fire, Frost, and Shock Damage become Fire, Frost, and Lightning Shield.
 - Weakness to Fire, Frost, Shock, Magicka, Common Disease, Blight Disease,
   Corprus Disease, Poison, or Normal Weapons becomes the matching resistance.
 - Burden becomes Feather, Poison becomes Restore Health, and Blind becomes
@@ -99,11 +104,12 @@ Universal Antidote uses the following harmful-to-beneficial conversions:
 
 - **A1 - Effortless Casting:** While player-cast Swift Swim is active,
   swimming costs 50% less Fatigue. Player-cast Water Breathing also grants
-  10 Night-Eye.
+  25 Night-Eye.
 - **A2 - Light Step:** While player-cast Jump is active, jumping costs 50%
   less Fatigue.
-- **A3 - Counterweight:** Player-cast Feather negates equal Burden; Burden on
-  others also briefly drains Strength.
+- **A3 - Counterweight:** Player-cast Feather negates equal Burden. Burden
+  cast on another actor also applies non-stacking Drain Strength equal to
+  half its magnitude for the same duration.
 - **A4 - Unbound Motion:** Player-cast Levitate grants Paralysis immunity.
 - **B1 - Reduced Casting Cost:** Refunds up to 15% of Alteration spell cost
   after other refunds; adjusted costs below 10 become free.
@@ -127,7 +133,8 @@ Universal Antidote uses the following harmful-to-beneficial conversions:
   player-cast Jump effect is active.
 - Counterweight adds enough Feather to cancel existing Burden, up to the
   magnitude of the active player-cast Feather. Burden cast on another actor
-  also drains Strength by 25% of its magnitude for up to 10 seconds.
+  also applies a visible, non-stacking Drain Strength effect equal to half
+  the Burden magnitude for the Burden's remaining duration.
 - Unbound Motion grants 100% Resist Paralysis while player-cast Levitate is
   active.
 - Reduced Casting Cost waits briefly for other Magicka-refund mechanics, then
@@ -427,8 +434,8 @@ Universal Antidote uses the following harmful-to-beneficial conversions:
 - **A3 - Ninefold Guard:** Each slot grants -5 Sound and +3 Shield.
 - **A4 - Living Aegis:** Each slot grants -5 Sound and +5 Shield.
 - **B1 - Unburdened Casting:** While mostly unarmored, spellcasting animations
-  are 25% faster.
-- **B2 - Thought Before Motion:** Casting animations are 50% faster.
+  are 50% faster.
+- **B2 - Thought Before Motion:** Casting animations are 100% faster.
 - **C1 - Focused Flesh:** Each empty slot grants 4% Resist Magicka.
 - **C2 - Soul-Sheathed:** Each empty slot also grants 2.5% Spell Absorption.
 - **D1 - Body as Focus:** While completely unarmored and above 25% Fatigue,

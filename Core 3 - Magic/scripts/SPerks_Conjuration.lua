@@ -33,10 +33,9 @@ local debugState = {
     discovered = 0,
     applications = 0,
     lastEmpowerment = nil,
+    lastDelivery = "No direct empowerment acknowledgement received.",
 }
 local updateTimer = 0
-
-local MAX_SPELL_EFFECTS = 8
 
 local CREATURE_SKILL_GROUPS = {
     combatSkill = {
@@ -350,9 +349,9 @@ local function refreshPassives()
     })
 end
 
--- Builds the complete B-chain bonus using vanilla magic effects. Applying it
--- through Core 0's global dynamic-spell service works for temporary summoned
--- actors that do not accept ordinary target-local events.
+-- Builds the complete B-chain bonus and lets the summoned actor's Core 0
+-- script own its exact modifier deltas. This avoids several permanent dynamic
+-- spell records for every creature summoned.
 local function applySummonEmpowerment(actor, b)
     local trace=SkillDebug.beginTrace("conjuration","Empowered Servants","new summon discovered",{
         actor = SkillDebug.objectId(actor),
@@ -425,23 +424,17 @@ local function applySummonEmpowerment(actor, b)
         addEffect({ id = "restorehealth", magnitudeMin = 2 })
     end
 
-    -- Morrowind spell records support at most eight effects. Split the
-    -- empowerment into quiet batches while presenting one logical perk.
-    for first = 1, #spellEffects, MAX_SPELL_EFFECTS do
-        local batch = {}
-        for index = first, math.min(first + MAX_SPELL_EFFECTS - 1, #spellEffects) do
-            table.insert(batch, spellEffects[index])
-        end
-        Common.applyDynamicSpell(actor, self, "Empowered Servant", batch, {
-            ignoreReflect = true,
-            ignoreResistances = true,
-            ignoreSpellAbsorption = true,
-            quiet = true,
-        })
-        trace:step("empowerment batch queued",{
-            batchFirst=first,batchSize=#batch,totalEffects=#spellEffects,
-        })
-    end
+    actor:sendEvent("SPerks_ApplyTimedEffectBundle",{
+        caster=self,
+        effects=spellEffects,
+        key="SkillPerks_EmpoweredServant",
+        resultEvent="SPerks_ConjurationEmpowermentApplied",
+        sourceEffect=ids["B"..b],
+        stackable=false,
+    })
+    trace:step("direct empowerment bundle sent",{
+        totalEffects=#spellEffects,
+    })
 
     debugState.applications = debugState.applications + 1
     debugState.lastEmpowerment = {
@@ -545,6 +538,7 @@ local function onConsoleCommand(mode, command)
         .. " healthBonus=" .. tostring(last.healthBonus)
         .. " expectedMaximum=" .. tostring(last.expectedMaximum)
         .. " duration=" .. tostring(last.duration))
+    consolePrint("Conjuration last delivery: "..tostring(debugState.lastDelivery))
 end
 
 Common.registerMagicPerks("conjuration","Conjuration",ids,{
@@ -561,6 +555,16 @@ Common.registerMagicPerks("conjuration","Conjuration",ids,{
 })
 
 return {
+    eventHandlers={
+        SPerks_ConjurationEmpowermentApplied=function(data)
+            data=data or {}
+            debugState.lastDelivery=string.format(
+                "target=%s applied=%s rejected=%s reasons=%s",
+                SkillDebug.objectId(data.target),tostring(data.applied),
+                tostring(data.rejected),tostring(data.reasons)
+            )
+        end,
+    },
     engineHandlers={
         onUpdate=onUpdate,
         onSave=function()
@@ -582,6 +586,7 @@ return {
             debugState={
                 casts=0,discovered=0,applications=0,
                 lastEmpowerment=nil,
+                lastDelivery="No direct empowerment acknowledgement received.",
             }
         end,
         onConsoleCommand=onConsoleCommand,
