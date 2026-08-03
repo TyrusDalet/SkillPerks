@@ -33,9 +33,10 @@ local trackedTool = nil
 local targetedLock = nil
 local patternStacks = 0
 local patternLockId = nil
-local bareHandUses = 0
+local masterLocksmithUses = 0
 local registeredIE = false
 local reportedMasteryRank = -1
+local reportedMasteryUses = -1
 
 local A_REDUCTION = { [1] = 0.20, [2] = 0.40, [3] = 0.60, [4] = 0.80 }
 local B_CAP = { [1] = 3, [2] = 6 }
@@ -173,56 +174,64 @@ end
 
 
 -- Keeps Core 0's synchronous activation handler aligned with current perk
--- ownership without making the global script poll the Framework.
-local function reportMasteryRank()
+-- ownership and remaining rest-limited attempts without global polling.
+local function reportMasteryState()
     local rank = dRank()
-    if rank == reportedMasteryRank then
+    if rank == reportedMasteryRank and masterLocksmithUses == reportedMasteryUses then
         return
     end
     reportedMasteryRank = rank
+    reportedMasteryUses = masterLocksmithUses
     core.sendGlobalEvent("SPerks_SetSecurityMasteryRank", {
         player = self,
         rank = rank,
+        uses = masterLocksmithUses,
     })
 end
 
 
 -- Resolves Master Locksmith as a quality-1 version of the normal Security
 -- roll: skill, Agility, Luck, and fatigue oppose the target's lock level.
-local function attemptBareHandLock(data)
+local function attemptMasterLocksmith(data)
     local rank = dRank()
     if rank == 0 or not data or not data.target or not data.target:isValid() then
         return
     end
     local cap = rank >= 2 and 2 or 1
-    if bareHandUses >= cap then
+    if masterLocksmithUses >= cap then
         ui.showMessage("Master Locksmith has already been used " .. (cap == 1 and "this rest." or "twice this rest."))
         return
     end
 
-    bareHandUses = bareHandUses + 1
-    local security = types.Actor.stats.skills.security(self).modified
+    masterLocksmithUses = masterLocksmithUses + 1
+    reportMasteryState()
+    local security = types.NPC.stats.skills.security(self).modified
     local agility = types.Actor.stats.attributes.agility(self).modified
     local luck = types.Actor.stats.attributes.luck(self).modified
     local chance = math.max(0, math.min(100,
         (security + agility / 5 + luck / 10) * CombatMath.getFatigueTerm(self)
             - math.max(0, data.lockLevel or 0)))
     local success = math.random() * 100 < chance
-    SkillDebug.traceEvent(SKILL_ID, "bare-hand lock attempt", {
+    SkillDebug.traceEvent(SKILL_ID, "Master Locksmith attempt", {
         chance = chance,
         rank = rank,
         success = success,
         target = SkillDebug.objectId(data.target),
     })
 
-    core.sendGlobalEvent("SPerks_ResolveSecurityBareHandAttempt", {
+    core.sendGlobalEvent("SPerks_ResolveSecurityMasterLocksmithAttempt", {
         player = self,
         target = data.target,
         success = success,
         weakenFraction = not success and rank >= 2 and 0.25 or 0,
     })
-    ui.showMessage(success and "The lock yields to your bare hands."
-        or "The lock resists your touch.")
+    if success then
+        ui.showMessage("The lock yields to your practiced touch.")
+    elseif rank >= 2 then
+        ui.showMessage("The lock does not yield, but you are more aware of its weaknesses.")
+    else
+        ui.showMessage("The lock remains fast.")
+    end
 end
 
 local function rememberTarget(data)
@@ -241,7 +250,8 @@ end
 
 local function onUiModeChanged(data)
     if data and data.oldMode == "Rest" then
-        bareHandUses = 0
+        masterLocksmithUses = 0
+        reportMasteryState()
     end
 end
 
@@ -252,9 +262,10 @@ local function clearSecurity()
     targetedLock = nil
     patternStacks = 0
     patternLockId = nil
-    bareHandUses = 0
+    masterLocksmithUses = 0
     reportedMasteryRank = -1
-    reportMasteryRank()
+    reportedMasteryUses = -1
+    reportMasteryState()
 end
 
 local function onUpdate(dt)
@@ -265,7 +276,7 @@ local function onUpdate(dt)
         rememberTool(held)
     end
     reconcileToolCondition()
-    reportMasteryRank()
+    reportMasteryState()
 end
 
 local function onSave()
@@ -274,7 +285,7 @@ local function onSave()
         patternEffects = patternEffects.snapshot(),
         patternStacks = patternStacks,
         patternLockId = patternLockId,
-        bareHandUses = bareHandUses,
+        masterLocksmithUses = masterLocksmithUses,
     }
 end
 
@@ -286,15 +297,16 @@ local function onLoad(data)
     -- not carry into an unrelated attempt after loading.
     patternStacks = 0
     patternLockId = nil
-    bareHandUses = data.bareHandUses or 0
+    masterLocksmithUses = data.masterLocksmithUses or data.bareHandUses or 0
     trackedTool = nil
     targetedLock = nil
     registeredIE = false
     reportedMasteryRank = -1
+    reportedMasteryUses = -1
     updatePatternBonus()
 end
 
--- Exposes the exact tool, lock, pattern, and rest-limited bare-hand state.
+-- Exposes the exact tool, lock, pattern, and rest-limited mastery state.
 local onConsoleCommand = SkillDebug.makeHandler({
     name = "Security",
     skillId = SKILL_ID,
@@ -310,9 +322,9 @@ local onConsoleCommand = SkillDebug.makeHandler({
                 tostring(patternLockId)
             ),
             string.format(
-                "Pattern: stacks=%d bareHandUses=%d InventoryExtender=%s masteryRank=%d",
+                "Pattern: stacks=%d MasterLocksmithUses=%d InventoryExtender=%s masteryRank=%d",
                 patternStacks,
-                bareHandUses,
+                masterLocksmithUses,
                 tostring(registeredIE),
                 reportedMasteryRank
             ),
@@ -329,7 +341,7 @@ Common.registerStealthPerks(SKILL_ID, "Security", ids, {
     B2 = { localizedName = "Known Mechanism", localizedFlavour = "By the final attempt, the lock feels less like an obstacle than an old argument.", localizedDescription = "Pattern Recognition stack cap rises to 6.", onRemove = clearSecurity },
     C1 = { localizedName = "Trap Mastery", localizedFlavour = "A trap is only a threat until you learn where its patience ends.", localizedDescription = "Probe condition loss on a failed disarm is reduced by 50%. Successful disarms have a 25% chance to preserve the use.", onRemove = clearSecurity },
     C2 = { localizedName = "Wire-Seer", localizedFlavour = "You read pressure, spring, and poison as if the trap wrote them down for you.", localizedDescription = "Trap Mastery's successful-disarm preservation chance rises to 50%.", onRemove = clearSecurity },
-    D1 = { localizedName = "Master Locksmith", localizedFlavour = "Tools help. Mastery begins when the lock fears your empty hand.", localizedDescription = "Once per rest, activating a lock with an empty right hand attempts to open it using a normal Security roll with tool quality 1. Failure has no penalty.", onRemove = clearSecurity },
+    D1 = { localizedName = "Master Locksmith", localizedFlavour = "Tools help, but mastery begins when every lock answers to your touch.", localizedDescription = "Once per rest, activating a locked object attempts to open it using a normal Security roll with tool quality 1. Failure has no penalty.", onRemove = clearSecurity },
     D2 = { localizedName = "Hands Like Keys", localizedFlavour = "Some locks open because metal meets metal. Others open because you have learned their name.", localizedDescription = "Master Locksmith can be attempted twice per rest. A failed attempt permanently reduces the lock's level by 25%.", onRemove = clearSecurity },
 })
 
@@ -337,7 +349,9 @@ return {
     eventHandlers = {
         SPerks_UiModeChanged = onUiModeChanged,
         SPerks_SecurityLockTarget = rememberTarget,
-        SPerks_SecurityBareHandAttempt = attemptBareHandLock,
+        SPerks_SecurityMasterLocksmithAttempt = attemptMasterLocksmith,
+        -- Legacy alias for Core 0 builds from before the interaction rename.
+        SPerks_SecurityBareHandAttempt = attemptMasterLocksmith,
     },
     engineHandlers = {
         onConsoleCommand = onConsoleCommand,

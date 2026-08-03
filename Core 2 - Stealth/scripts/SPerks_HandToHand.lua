@@ -239,6 +239,7 @@ local function tryKnockout(attack, target)
     core.sendGlobalEvent("SPerks_CreateAndApplySpell", {
         target = target,
         caster = self,
+        preferredSpellId = "SPerks_Native_Paralyze_"..tostring(D_DURATION[rank]).."s",
         spellName = "SkillPerks Knockout",
         effects = { { id = "paralyze", magnitudeMin = 1, duration = D_DURATION[rank] } },
         -- Knockout's perk chance is the first gate, followed by OpenMW's

@@ -101,6 +101,7 @@ local function addBleed(target)
         core.sendGlobalEvent("SPerks_CreateAndApplySpell", {
             target = target,
             caster = self,
+            preferredSpellId = "SPerks_Native_Paralyze_1s",
             spellName = "SkillPerks Bleeding Stagger",
             effects = { { id = "paralyze", magnitudeMin = 1, duration = 1 } },
             activeSpellOptions = { ignoreResistances = false, quiet = true },

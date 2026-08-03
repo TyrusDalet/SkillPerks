@@ -132,8 +132,8 @@ Load those dependencies before `Core 2 SkillPerks.omwscripts`.
 - **C1 - Trap Mastery:** Failed probe wear is halved; successful disarms have
   a 25% chance to preserve the use.
 - **C2 - Wire-Seer:** Successful-disarm preservation rises to 50%.
-- **D1 - Master Locksmith:** Once per rest, activating a lock with an empty
-  right hand attempts a normal Security roll at tool quality 1.
+- **D1 - Master Locksmith:** Once per rest, activating a locked object attempts
+  a normal Security roll at tool quality 1, regardless of held equipment.
 - **D2 - Hands Like Keys:** Allows two attempts per rest; a failed attempt
   permanently reduces the lock's level by 25%.
 
@@ -296,10 +296,10 @@ the helmet, each pauldron, each gauntlet, and boots are worth 1 each.
   Its 25% or 50% successful-disarm preservation roll is separate.
 - A probe or lockpick that is destroyed by spending its final use may cease to
   exist before a preservation effect can return that use.
-- Master Locksmith requires an empty right hand. Its chance is the normal
-  `Security + Agility / 5 + Luck / 10`, modified by current Fatigue and reduced
-  by the lock level. Attempting consumes one of the perk's uses even on
-  failure; resting restores the allowance.
+- Master Locksmith triggers when activating a locked object, regardless of
+  held equipment. Its chance is the normal `Security + Agility / 5 + Luck / 10`,
+  modified by current Fatigue and reduced by the lock level. Attempting consumes
+  one of the perk's uses even on failure; resting restores the allowance.
 - Hands Like Keys leaves a failed lock closed but permanently reduces its
   current lock level by 25%. Successful checks simply open the lock.
 
