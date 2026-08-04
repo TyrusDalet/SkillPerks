@@ -30,14 +30,143 @@ local wasJumpPressed = false
 local jumpRefundPending = nil
 local lastFatigueReduction = nil
 local pairingDiagnostics = {}
+local trackedPairingSpells = {}
 local lastCounterweight = "No Burden rider has been attempted."
+local pairingPollCount = 0
+local pairingPollStage = "not started"
+local pairingPollLastCompleted = nil
 
 local REFUND_DELAY = 0.1
 local MOVEMENT_FATIGUE_REDUCTION = 0.50
 local JUMP_SAMPLE_DELAY = 0.15
 local PAIRING_POLL_INTERVAL = 0.5
+local PAIRING_EFFECT_IDS = {
+    swiftswim=true,
+    waterbreathing=true,
+    jump=true,
+    feather=true,
+    levitate=true,
+}
 
 local function rank(chain) return Common.rank(ids, chain) end
+
+--- Returns the largest magnitude a spell record can contribute for one
+--- effect. The cache stores records rather than live ActiveSpell userdata so
+--- it remains safe to persist and does not retain engine-owned iterators.
+--- @param effect table Spell-record effect.
+--- @return number maximum
+local function effectMaximum(effect)
+    return math.max(0,tonumber(
+        effect and (effect.maxMagnitude or effect.magnitudeMax
+            or effect.minMagnitude or effect.magnitudeMin)
+    ) or 0)
+end
+
+--- Remembers the relevant effects of one successfully cast player spell.
+--- The framework handler already excludes abilities, enchantments, items,
+--- and casts that were not made by the player.
+--- @param spell table Spell record supplied by the skill-use dispatcher.
+--- @return boolean tracked Whether the spell contains an A-chain pairing.
+local function trackPairingSpell(spell)
+    if not spell or spell.id==nil then return false end
+    local tracked={id=tostring(spell.id),effects={}}
+    for _,effect in pairs(spell.effects or {}) do
+        local effectId=tostring(effect.id or ""):lower()
+        if PAIRING_EFFECT_IDS[effectId] then
+            local state=tracked.effects[effectId]
+            if not state then
+                state={present=true,maximum=0}
+                tracked.effects[effectId]=state
+            end
+            state.maximum=state.maximum+effectMaximum(effect)
+        end
+    end
+    if next(tracked.effects)==nil then return false end
+    trackedPairingSpells[tracked.id]=tracked
+    SkillDebug.traceEvent("alteration","Pairing spell tracked",{
+        spell=tracked.id,effects=tracked.effects,
+    })
+    return true
+end
+
+--- Builds the A-chain state from remembered spell IDs. `isSpellActive` is a
+--- direct engine lookup and avoids OpenMW's temporary `pairs(activeSpells)`
+--- iterator closure, whose registry-reference cleanup caused the reported
+--- native crash. Aggregate active-effect values are capped by the qualifying
+--- spell records so unrelated abilities or equipment cannot inflate them
+--- beyond what the qualifying player-cast spells could provide.
+--- @return table snapshot Pairing values keyed by effect id.
+--- @return table diagnostics Cache checks performed this poll.
+local function trackedPairingEffectSnapshot()
+    local result={}
+    for effectId in pairs(PAIRING_EFFECT_IDS) do
+        result[effectId]={magnitude=0,present=false,maximum=0}
+    end
+
+    local diagnostics={
+        qualifyingSpells=0,scannedSpells=0,expiredSpells=0,failedChecks=0,
+    }
+    local activeSpells=types.Actor.activeSpells(self)
+    local expired={}
+    for spellId,tracked in pairs(trackedPairingSpells) do
+        diagnostics.scannedSpells=diagnostics.scannedSpells+1
+        local ok,active=pcall(
+            activeSpells.isSpellActive,activeSpells,spellId
+        )
+        if not ok then
+            diagnostics.failedChecks=diagnostics.failedChecks+1
+        elseif active then
+            diagnostics.qualifyingSpells=diagnostics.qualifyingSpells+1
+            for effectId,state in pairs(tracked.effects or {}) do
+                local aggregate=result[effectId]
+                if aggregate then
+                    aggregate.present=true
+                    aggregate.maximum=aggregate.maximum
+                        +math.max(0,tonumber(state.maximum) or 0)
+                end
+            end
+        else
+            expired[#expired+1]=spellId
+        end
+    end
+
+    for _,spellId in ipairs(expired) do
+        trackedPairingSpells[spellId]=nil
+        diagnostics.expiredSpells=diagnostics.expiredSpells+1
+    end
+    for effectId,state in pairs(result) do
+        if state.present and state.maximum>0 then
+            state.magnitude=math.min(
+                state.maximum,
+                math.max(0,Common.getEffectMagnitude(self,effectId))
+            )
+        end
+        state.maximum=nil
+    end
+    return result,diagnostics
+end
+
+--- Restores only plain cache data from a save. Invalid or obsolete entries
+--- are ignored and valid entries are rechecked on the next polling interval.
+--- @param saved table|nil
+local function restoreTrackedPairingSpells(saved)
+    trackedPairingSpells={}
+    for spellId,entry in pairs(saved or {}) do
+        local restored={id=tostring(spellId),effects={}}
+        for effectId,state in pairs(entry and entry.effects or {}) do
+            effectId=tostring(effectId):lower()
+            if PAIRING_EFFECT_IDS[effectId] then
+                restored.effects[effectId]={
+                    present=true,
+                    maximum=math.max(0,tonumber(state and state.maximum) or 0),
+                }
+            end
+        end
+        if next(restored.effects)~=nil then
+            trackedPairingSpells[restored.id]=restored
+        end
+    end
+end
 
 --- Returns the Burden effect carried by a spell record or active spell.
 --- @param spell table|nil
@@ -53,13 +182,29 @@ end
 -- player-cast Alteration effect, so consumables cannot enable them.
 local function refreshPairedEffects()
     local a = rank("A")
+    pairingPollCount = pairingPollCount + 1
+    pairingPollStage = "begin"
+    local trace = SkillDebug.beginTrace(
+        "alteration",
+        "Effortless Casting poll",
+        "paired-effect reconciliation",
+        {
+            aRank = a,
+            poll = pairingPollCount,
+            previousBreathing = pairingDiagnostics.breathing,
+            previousSwiftSwim = pairingDiagnostics.swift,
+        }
+    )
     local snapshot={}
     local diagnostics={qualifyingSpells=0,scannedSpells=0}
     if a>0 then
-        snapshot,diagnostics=Common.playerSpellEffectSnapshot(self,{
-            "swiftswim","waterbreathing","jump","feather","levitate",
-        })
+        pairingPollStage = "checking tracked spells"
+        snapshot,diagnostics=trackedPairingEffectSnapshot()
+        trace:step("tracked-spell snapshot completed", diagnostics)
+    else
+        trace:step("tracked-spell snapshot skipped", {reason="A chain inactive"})
     end
+    pairingPollStage = "reading active effects"
     local swift = a >= 1 and snapshot.swiftswim.magnitude or 0
     local breathing = a >= 1 and snapshot.waterbreathing.present or false
     local jump = a >= 2 and snapshot.jump.magnitude or 0
@@ -69,18 +214,32 @@ local function refreshPairedEffects()
     local nightEyeBonus = breathing and 25 or 0
     local featherBonus = feather > 0 and math.min(feather, burden) or 0
     local paralysisResist = levitate > 0 and 100 or 0
+    trace:step("pairing values calculated",{
+        burden=burden,feather=feather,featherBonus=featherBonus,
+        jump=jump,levitate=levitate,nightEyeBonus=nightEyeBonus,
+        paralysisResist=paralysisResist,swiftSwim=swift,
+        waterBreathing=breathing,
+    })
 
     effortlessSwimmingActive = swift > 0
     lightStepActive = jump > 0
+    pairingPollStage = "applying Night-Eye"
     effects.apply("nighteye", nil, nightEyeBonus)
+    trace:step("Night-Eye reconciled",{magnitude=nightEyeBonus})
+    pairingPollStage = "applying Feather"
     effects.apply("feather", nil, featherBonus)
+    trace:step("Feather reconciled",{magnitude=featherBonus})
+    pairingPollStage = "applying Resist Paralysis"
     effects.apply("resistparalysis", nil, paralysisResist)
+    trace:step("Resist Paralysis reconciled",{magnitude=paralysisResist})
     pairingDiagnostics={
         breathing=breathing,feather=feather,featherBonus=featherBonus,
         jump=jump,levitate=levitate,nightEyeBonus=nightEyeBonus,
         paralysisResist=paralysisResist,swift=swift,
         qualifyingSpells=diagnostics.qualifyingSpells,
         scannedSpells=diagnostics.scannedSpells,
+        expiredSpells=diagnostics.expiredSpells,
+        failedChecks=diagnostics.failedChecks,
     }
     SkillDebug.traceState("alteration","Alteration pairings","paired-effects",{
         aRank=a, waterBreathing=breathing,
@@ -92,28 +251,33 @@ local function refreshPairedEffects()
         qualifyingSpells=diagnostics.qualifyingSpells,
         scannedSpells=diagnostics.scannedSpells,
     })
+    pairingPollStage = "complete"
+    pairingPollLastCompleted = core.getSimulationTime()
+    trace:finish("paired effects reconciled",{
+        poll=pairingPollCount,simulationTime=pairingPollLastCompleted,
+    })
 end
 
---- Describes every active Water Breathing spell, including rejected sources,
---- so `luaalt debug` can distinguish detection failures from rider failures.
+--- Describes cached Water Breathing sources without traversing the live
+--- ActiveSpells collection. This keeps the debug command on the same safe
+--- direct-lookup path as normal A-chain polling.
 local function waterBreathingSourceSummary()
     local summaries={}
-    for _,spell in pairs(types.Actor.activeSpells(self)) do
-        for _,effect in pairs(spell.effects or {}) do
-            if effect.id=="waterbreathing" then
-                local source=Common.describeActiveSpellSource(self,spell)
-                summaries[#summaries+1]=string.format(
-                    "spell=%s caster=%s casterMatches=%s item=%s known=%s spellforge=%s authorized=%s qualifies=%s",
-                    tostring(source.id),SkillDebug.objectId(source.caster),
-                    tostring(source.casterIsActor),SkillDebug.objectId(source.item),
-                    tostring(source.known),tostring(source.spellforge),
-                    tostring(source.spellforgeAuthorized),tostring(source.qualifies)
-                )
-            end
+    local activeSpells=types.Actor.activeSpells(self)
+    for spellId,tracked in pairs(trackedPairingSpells) do
+        if tracked.effects and tracked.effects.waterbreathing then
+            local ok,active=pcall(
+                activeSpells.isSpellActive,activeSpells,spellId
+            )
+            summaries[#summaries+1]=string.format(
+                "spell=%s active=%s check=%s",
+                tostring(spellId),tostring(ok and active==true),
+                ok and "ok" or "failed"
+            )
         end
     end
     return #summaries>0 and table.concat(summaries,"; ")
-        or "no active Water Breathing spell found"
+        or "no tracked player-cast Water Breathing spell"
 end
 
 --- Returns whether the player is actively swimming rather than merely
@@ -220,6 +384,9 @@ interfaces.ErnPerkFramework.registerSkillUseHandler({
     playerCastOnly = true,
     handler = function(event)
         local spell=event and event.spell
+        if rank("A")>0 and spell then
+            trackPairingSpell(spell)
+        end
         if rank("A")>=3 and spell and burdenEffect(spell) then
             lastCounterweight=string.format(
                 "Burden cast observed: spell=%s; awaiting target-local landing.",
@@ -588,6 +755,20 @@ local onConsoleCommand = SkillDebug.makeHandler({
                 SkillDebug.number(pairingDiagnostics.qualifyingSpells),
                 SkillDebug.number(pairingDiagnostics.scannedSpells)
             ),
+            string.format(
+                "Effortless poll: count=%s stage=%s lastCompleted=%s interval=%s",
+                SkillDebug.number(pairingPollCount,0),
+                tostring(pairingPollStage),
+                SkillDebug.number(pairingPollLastCompleted),
+                SkillDebug.number(PAIRING_POLL_INTERVAL)
+            ),
+            string.format(
+                "Pairing cache: active=%s tracked=%s expiredLastPoll=%s failedChecks=%s",
+                SkillDebug.number(pairingDiagnostics.qualifyingSpells,0),
+                SkillDebug.number(pairingDiagnostics.scannedSpells,0),
+                SkillDebug.number(pairingDiagnostics.expiredSpells,0),
+                SkillDebug.number(pairingDiagnostics.failedChecks,0)
+            ),
             "Water Breathing source: "..waterBreathingSourceSummary(),
             "Last Counterweight: "..lastCounterweight,
             "Counterweight detection: Core 0 observes only the actor actually carrying Burden.",
@@ -638,6 +819,7 @@ return {
                 effects=effects.snapshot(),
                 pools=pools,
                 expiry=expiry,
+                trackedPairingSpells=trackedPairingSpells,
             }
         end,
         onLoad=function(data)
@@ -652,6 +834,7 @@ return {
             jumpRefundPending = nil
             lastFatigueReduction = nil
             pairingDiagnostics = {}
+            restoreTrackedPairingSpells(data and data.trackedPairingSpells)
             pools=(data and data.pools) or {shield=0,fireshield=0,frostshield=0,lightningshield=0}
             expiry=(data and data.expiry) or {}
         end,
