@@ -32,9 +32,20 @@ Log(3, nil, "SkillPerks Core 0 hit diagnostics loaded (raw bridge trace v2).")
 
 local RESOURCE_DELTA_EVENT = "ErnPerkFramework_ApplyActorResourceDelta"
 local RESOURCE_RESULT_EVENT = "SPerks_HitResolutionApplied"
+local PERK_RELOAD_REQUEST_EVENT = "ErnPerkFramework_RequestPlayerPerkReload"
+local PERK_RELOAD_RESULT_EVENT = "SPerks_VersionPerkReloadResult"
+local SKILLPERKS_VERSION = "0.1.9"
+local VERSION_MIGRATION_DELAY = 3
 local resourceRequestSerial = 0
 local spellforgeAuthorizations = {}
 local spellforgeCleanupTimer = 0
+local savedSkillPerksVersion
+local versionMigrationNeeded = false
+local versionMigrationRequested = false
+local versionMigrationAttempted = false
+local versionMigrationTimer = VERSION_MIGRATION_DELAY
+local versionMigrationRequestId
+local versionMigrationSerial = 0
 
 local HIT_TRACE_SKILLS = {
     "acrobatics",
@@ -308,11 +319,88 @@ local function isSpellforgeSpellAuthorized(spellId)
         >= core.getSimulationTime()
 end
 
+--- Parses the persisted public-style version into comparable numeric parts.
+--- Missing versions represent saves created before version tracking existed.
+--- @param value any Saved or loaded version.
+--- @return number major
+--- @return number minor
+--- @return number patch
+local function parseVersion(value)
+    local major, minor, patch = tostring(value or ""):match(
+        "^(%d+)%.(%d+)%.(%d+)"
+    )
+    return tonumber(major) or 0, tonumber(minor) or 0, tonumber(patch) or 0
+end
+
+--- Returns whether a saved SkillPerks version predates the loaded scripts.
+--- A newer saved version is preserved during a downgrade and never rebuilt.
+--- @param saved any Persisted version.
+--- @param loaded string Current internal version.
+--- @return boolean
+local function isOlderVersion(saved, loaded)
+    local savedMajor, savedMinor, savedPatch = parseVersion(saved)
+    local loadedMajor, loadedMinor, loadedPatch = parseVersion(loaded)
+    if savedMajor ~= loadedMajor then return savedMajor < loadedMajor end
+    if savedMinor ~= loadedMinor then return savedMinor < loadedMinor end
+    return savedPatch < loadedPatch
+end
+
+--- Requests a purchase-order rebuild after all perk scripts have registered.
+--- The Framework queues this behind any active initial synchronization pass.
+local function requestVersionMigration()
+    versionMigrationSerial = versionMigrationSerial + 1
+    versionMigrationRequestId = "SkillPerksVersionMigration_"
+        .. tostring(versionMigrationSerial)
+    versionMigrationRequested = true
+    versionMigrationAttempted = true
+    self:sendEvent(PERK_RELOAD_REQUEST_EVENT, {
+        requestId = versionMigrationRequestId,
+        source = "SkillPerks",
+        requestedVersion = SKILLPERKS_VERSION,
+        resultEvent = PERK_RELOAD_RESULT_EVENT,
+    })
+    Log(1, "version-migration", "SkillPerks update detected (saved="
+        .. tostring(savedSkillPerksVersion or "unversioned") .. ", loaded="
+        .. SKILLPERKS_VERSION .. "); queued owned-perk rebuild.")
+end
+
+--- Commits the new saved version only after the Framework confirms that every
+--- formerly owned perk completed the normal refund-and-repurchase lifecycle.
+--- @param data table|nil Framework rebuild result.
+local function onVersionPerkReloadResult(data)
+    data = data or {}
+    if data.requestId ~= versionMigrationRequestId then return end
+    versionMigrationRequested = false
+    if data.success then
+        savedSkillPerksVersion = SKILLPERKS_VERSION
+        versionMigrationNeeded = false
+        Log(1, "version-migration", "SkillPerks migration to "
+            .. SKILLPERKS_VERSION .. " completed: restored="
+            .. tostring(data.restored or 0) .. " forced="
+            .. tostring(data.forced or 0) .. ".")
+        return
+    end
+    Log(1, "version-migration", "SkillPerks migration to "
+        .. SKILLPERKS_VERSION .. " was not recorded as complete: reason="
+        .. tostring(data.reason) .. " perk=" .. tostring(data.perkID)
+        .. " failed=" .. tostring(data.failed or 0) .. ".")
+end
+
 local function onUpdate(dt)
     spellforgeCleanupTimer=spellforgeCleanupTimer-dt
-    if spellforgeCleanupTimer>0 then return end
-    spellforgeCleanupTimer=0.5
-    clearExpiredSpellforgeAuthorizations()
+    if spellforgeCleanupTimer<=0 then
+        spellforgeCleanupTimer=0.5
+        clearExpiredSpellforgeAuthorizations()
+    end
+
+    if versionMigrationNeeded
+            and not versionMigrationRequested
+            and not versionMigrationAttempted then
+        versionMigrationTimer = versionMigrationTimer - dt
+        if versionMigrationTimer <= 0 then
+            requestVersionMigration()
+        end
+    end
 end
 
 local function onSave()
@@ -322,7 +410,10 @@ local function onSave()
         local remaining=expiresAt-now
         if remaining>0 then saved[spellId]=remaining end
     end
-    return {spellforgeAuthorizations=saved}
+    return {
+        spellforgeAuthorizations=saved,
+        skillPerksVersion=savedSkillPerksVersion,
+    }
 end
 
 local function onLoad(data)
@@ -335,11 +426,21 @@ local function onLoad(data)
             spellforgeAuthorizations[spellId]=now+remaining
         end
     end
+    savedSkillPerksVersion = data and data.skillPerksVersion or nil
+    versionMigrationNeeded = isOlderVersion(
+        savedSkillPerksVersion,
+        SKILLPERKS_VERSION
+    )
+    versionMigrationRequested = false
+    versionMigrationAttempted = false
+    versionMigrationRequestId = nil
+    versionMigrationTimer = VERSION_MIGRATION_DELAY
 end
 
 return {
     interfaceName = "SkillPerksMagic",
     interface = {
+        INTERNAL_VERSION = SKILLPERKS_VERSION,
         isSpellforgeSpellAuthorized = isSpellforgeSpellAuthorized,
     },
     eventHandlers = {
@@ -349,6 +450,7 @@ return {
         SPerks_MagicSpellApplicationResult = onMagicSpellApplicationResult,
         SPerks_SpellforgeMagicHit = authorizeSpellforgeSelfEffect,
         SPerks_SpellforgeEffectApplied = authorizeSpellforgeSelfEffect,
+        [PERK_RELOAD_RESULT_EVENT] = onVersionPerkReloadResult,
     },
     engineHandlers = {
         onLoad=onLoad,

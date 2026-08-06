@@ -22,6 +22,11 @@ Stealth, and Magic import shared Core 0 modules such as `debug.lua`, `hit.lua`,
 `stat_tracker.lua`, and `magic_detection.lua`, and mismatched Core versions
 will prevent the perk scripts from starting.
 
+SkillPerks records its installed version in each save. After an update, Core 0
+automatically asks PerkFramework to refund and repurchase every owned perk in
+its original acquisition order. This reapplies updated perk effects without
+requiring the player to enter `luaperks reload` manually.
+
 `SPerks.ESP` contains shared records used by the gameplay Cores, including
 repair tools and supporting spell effects. Keep it active whenever SkillPerks
 is installed.
@@ -117,6 +122,11 @@ required. Spellforge spells cast by the player use the same Magic-perk source
 rules as ordinary and custom spells; abilities, enchanted items, scrolls, and
 scripted secondary effects remain excluded unless a perk explicitly permits
 them. Install these optional mods only if you want their own features.
+
+Tamriel_Data's Banking and Stock Exchange frameworks are also optional.
+Mercantile's Golden Measure recognizes documented bank deposits, outstanding
+loans, share counts, and current share prices when those systems are present;
+without them, the perk simply uses carried gold.
 
 ## Credits
 

@@ -10,9 +10,31 @@ openmw.self, so gameplay Cores should use these helpers rather than repeating
 strict actor-identity checks.
 ]]
 
+local interfaces = require("openmw.interfaces")
 local types = require("openmw.types")
 
 local Hit = {}
+
+--- Recognizes a deliberately source-less Combat event. Mods use Unspecified
+--- for reflected or scripted resource damage which must remain visible to
+--- incoming-hit listeners but must not impersonate a player's weapon strike.
+--- Nil is retained as an unknown legacy payload because older valid OpenMW
+--- melee bridges can omit sourceType entirely.
+--- @param attack table|nil OpenMW hit payload.
+--- @return boolean unspecified
+function Hit.hasUnspecifiedSource(attack)
+    local sourceType = attack and attack.sourceType
+    if sourceType == nil then
+        return false
+    end
+    local combat = interfaces.Combat
+    local sourceTypes = combat and combat.ATTACK_SOURCE_TYPES
+    local unspecified = sourceTypes and sourceTypes.Unspecified
+    if unspecified ~= nil and sourceType == unspecified then
+        return true
+    end
+    return tostring(sourceType):lower() == "unspecified"
+end
 
 --- Recognizes the player through OpenMW's native GameObject type field, with
 --- the type API predicate retained for wrapper variants.
@@ -150,6 +172,9 @@ function Hit.playerAttackSource(attack, player)
     end
     if not player then
         return nil, "nearby player unavailable"
+    end
+    if Hit.hasUnspecifiedSource(attack) then
+        return nil, "attack source is Unspecified scripted or reflected damage"
     end
     if attack.skillPerksPlayerOwned == true then
         return attack.skillPerksOwnershipSource or "core0-bridge", "authoritative Core 0 marker"

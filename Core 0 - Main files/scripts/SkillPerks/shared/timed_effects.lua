@@ -33,6 +33,15 @@ local NATIVE_ONLY = {
     paralyze=true,recall=true,soultrap=true,
 }
 
+-- These continuous aggregate modifiers are safe to reproduce with
+-- ActorActiveEffects.modify. Listing them explicitly avoids iterating the
+-- engine-backed magic-effect record map, which is unsafe in OpenMW 0.51.
+local SAFE_AGGREGATE_EFFECT = {
+    blind = true,
+    burden = true,
+    sound = true,
+}
+
 local function needsNativeSpell(id,record)
     return NATIVE_ONLY[id]==true
         or id:find("^summon")~=nil
@@ -222,6 +231,7 @@ function TimedEffects.new(actor,sourceName)
         local isSupported = isRestore
             or id == "fortifyattribute" or id == "drainattribute"
             or id == "fortifyskill" or DYNAMIC_FORTIFY[id] ~= nil
+            or SAFE_AGGREGATE_EFFECT[id] == true
             or (effectRecord ~= nil and not needsNativeSpell(id,effectRecord))
         if not isSupported then return false, "unsupported effect" end
 

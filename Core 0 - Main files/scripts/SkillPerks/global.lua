@@ -77,7 +77,9 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
     Dialogue and merchant bridge
         Relays Inventory Extender's actor-specific UI lifecycle to SkillPerks
         player scripts, and owns NPC Mercantile, disposition, and barter-gold
-        writes used by the Mercantile and Speechcraft trees.
+        writes used by the Mercantile and Speechcraft trees. It also reads the
+        optional Tamriel_Data banking/stock globals and performs crime-level
+        writes, both of which are unavailable from player scripts.
 
     Spell Framework Plus bridge
         Spellforge applies its generated spell helpers through Spell Framework
@@ -348,6 +350,69 @@ local function modifyNpcBarterGold(data)
     end
     local current = types.Actor.getBarterGold(data.npc)
     types.Actor.setBarterGold(data.npc, math.max(0, current + (data.amount or 0)))
+end
+
+local BANK_IDS = { "bri", "pet", "hla", "cmp", "mas", "cro" }
+local STOCK_IDS = { "eec", "cmc", "atc", "rhc", "cwa", "wsc", "stc", "nwt", "bic" }
+
+--- Reads one optional Tamriel_Data global without assuming the framework is
+--- installed. Missing globals simply contribute zero to the wealth snapshot.
+local function readGlobalNumber(variables, id)
+    local ok, value = pcall(function() return variables[id] end)
+    if not ok then
+        return 0
+    end
+    return tonumber(value) or 0
+end
+
+--- Returns bank deposits, loan principal, and current stock value to the
+--- requesting player. Mercantile owns the timing and converts this external
+--- wealth into its D-chain bonuses; Core 0 only accesses global MWScript data.
+local function requestMercantileWealth(data)
+    data = data or {}
+    local player = data.player
+    if not player or not player:isValid() then
+        return
+    end
+
+    local variables = world.mwscript.getGlobalVariables(player)
+    local deposits = 0
+    local debt = 0
+    local stocks = 0
+
+    for _, bankId in ipairs(BANK_IDS) do
+        deposits = deposits + math.max(0, readGlobalNumber(
+            variables, "t_glob_bank_" .. bankId .. "_acctamount"))
+        debt = debt + math.max(0, readGlobalNumber(
+            variables, "t_glob_bank_" .. bankId .. "_loanamount"))
+    end
+    for _, stockId in ipairs(STOCK_IDS) do
+        local price = math.max(0, readGlobalNumber(
+            variables, "t_glob_stockprice" .. stockId))
+        local count = math.max(0, readGlobalNumber(
+            variables, "t_glob_stockcountplayer" .. stockId))
+        stocks = stocks + price * count
+    end
+
+    player:sendEvent("SPerks_MercantileWealthSnapshot", {
+        deposits = deposits,
+        debt = debt,
+        stocks = stocks,
+    })
+end
+
+--- Removes a source-owned share of a newly incurred bounty. Subtracting from
+--- the live value preserves any other crime changes made before this global
+--- event reaches the engine instead of overwriting the whole crime level.
+local function reducePlayerCrimeLevel(data)
+    data = data or {}
+    local player = data.player
+    local amount = math.max(0, math.floor(tonumber(data.amount) or 0))
+    if not player or not player:isValid() or amount == 0 then
+        return
+    end
+    local current = types.Player.getCrimeLevel(player)
+    types.Player.setCrimeLevel(player, math.max(0, current - amount))
 end
 
 interfaces.Activation.addHandlerForType(types.Door, onSecurityLockableActivated)
@@ -842,6 +907,8 @@ return {
         SPerks_ModifyNpcSkill = modifyNpcSkill,
         SPerks_ModifyNpcDisposition = modifyNpcDisposition,
         SPerks_ModifyNpcBarterGold = modifyNpcBarterGold,
+        SPerks_RequestMercantileWealth = requestMercantileWealth,
+        SPerks_ReducePlayerCrimeLevel = reducePlayerCrimeLevel,
         IE_UIModeChanged = relayUiModeChanged,
         MagExp_OnMagicHit = relaySpellforgeMagicHit,
         MagExp_OnEffectApplied = relaySpellforgeEffectApplied,

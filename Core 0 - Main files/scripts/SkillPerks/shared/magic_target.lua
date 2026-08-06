@@ -739,6 +739,7 @@ local function setTimedEffectBundle(data)
     data=data or {}
     local applied=0
     local rejected={}
+    local observed={}
     for index,effect in ipairs(data.effects or {}) do
         local effectKey=effect.key
             or (tostring(data.key or "SkillPerks_Timed")..":"..tostring(index))
@@ -747,11 +748,29 @@ local function setTimedEffectBundle(data)
             sourceEffect=data.sourceEffect,
         })
         if ok then applied=applied+1 else rejected[#rejected+1]=tostring(reason) end
+        local effectId=tostring(effect.id or ""):lower()
+        local extraParam=effect.affectedAttribute or effect.affectedSkill
+        local activeEffect
+        if effectId~="" then
+            if extraParam then
+                activeEffect=types.Actor.activeEffects(pself):getEffect(effectId,extraParam)
+            else
+                activeEffect=types.Actor.activeEffects(pself):getEffect(effectId)
+            end
+        end
+        observed[index]={
+            id=effectId,
+            extraParam=extraParam,
+            requested=tonumber(effect.magnitudeMin or effect.magnitude) or 0,
+            magnitude=activeEffect and (tonumber(activeEffect.magnitude) or 0) or 0,
+            accepted=ok,
+            result=tostring(reason),
+        }
     end
     if data.caster and data.caster:isValid() and data.resultEvent then
         data.caster:sendEvent(data.resultEvent,{
             applied=applied,rejected=#rejected,target=pself,
-            reasons=table.concat(rejected,"; "),
+            reasons=table.concat(rejected,"; "),effects=observed,key=data.key,
         })
     end
 end
