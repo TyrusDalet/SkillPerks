@@ -24,7 +24,7 @@ local ids = Common.ids("acrobatics")
 local effectTracker = StatTracker.newActiveEffectTracker(self)
 local landingStats = StatTracker.newStatModTracker(self, "Acrobatics Light Landing")
 local landingEffects = StatTracker.newActiveEffectTracker(self)
-local momentumStats = StatTracker.newStatModTracker(self, "Acrobatics Momentum")
+local momentumStats = StatTracker.newStatModTracker(self, "Acrobatics Cloud Jump")
 local momentumEffects = StatTracker.newActiveEffectTracker(self)
 
 local wasGrounded = true
@@ -35,6 +35,7 @@ local aerialStrikeWindow = 0
 local chameleonTimer = 0
 local jumpStacks = 0
 local jumpTimer = 0
+local jumpTimerAwaitingLanding = false
 local previousHealth = types.Actor.stats.dynamic.health(self).current
 local recentIncomingDamage = 0
 local recentIncomingDamageTime = -9999
@@ -75,6 +76,7 @@ local function startJumpEffects()
     if rankD > 0 then
         jumpStacks = math.min(D_CAP[rankD], jumpStacks + 1)
         jumpTimer = 3
+        jumpTimerAwaitingLanding = true
         updateMomentumEffects()
     end
 end
@@ -133,6 +135,7 @@ local function clearAcrobatics()
     chameleonTimer = 0
     jumpStacks = 0
     jumpTimer = 0
+    jumpTimerAwaitingLanding = false
     recentIncomingDamage = 0
 end
 
@@ -147,6 +150,7 @@ local function onUpdate(dt)
     end
 
     if grounded and not wasGrounded then
+        jumpTimerAwaitingLanding = false
         local drop = math.max(0, highestZ - self.position.z)
         local rankA = aRank()
         if rankA > 0 and drop > 250 then
@@ -185,7 +189,10 @@ local function onUpdate(dt)
             landingEffects.apply("fortifyattribute", "speed", 0)
         end
     end
-    if aerialStrikeWindow > 0 then
+    -- The strike window is armed at takeoff so aerial hits remain eligible,
+    -- but its grace period is spent only after the player returns to ground.
+    -- Long falls therefore cannot exhaust the post-landing opportunity.
+    if aerialStrikeWindow > 0 and grounded then
         aerialStrikeWindow = math.max(0, aerialStrikeWindow - dt)
     end
     if chameleonTimer > 0 then
@@ -194,7 +201,9 @@ local function onUpdate(dt)
             effectTracker.apply("chameleon", nil, 0)
         end
     end
-    if jumpTimer > 0 then
+    -- Cloud Jump's chain window is refreshed at takeoff but starts expiring
+    -- only after the landing transition, matching the aerial-strike timer.
+    if jumpTimer > 0 and grounded and not jumpTimerAwaitingLanding then
         jumpTimer = math.max(0, jumpTimer - dt)
         if jumpTimer == 0 then
             jumpStacks = 0
@@ -222,6 +231,7 @@ local function onSave()
         chameleonTimer = chameleonTimer,
         jumpStacks = jumpStacks,
         jumpTimer = jumpTimer,
+        jumpTimerAwaitingLanding = jumpTimerAwaitingLanding,
     }
 end
 
@@ -237,6 +247,13 @@ local function onLoad(data)
     chameleonTimer = data.chameleonTimer or 0
     jumpStacks = data.jumpStacks or 0
     jumpTimer = data.jumpTimer or 0
+    if data.jumpTimerAwaitingLanding ~= nil then
+        jumpTimerAwaitingLanding = data.jumpTimerAwaitingLanding == true
+    else
+        -- Older saves did not persist this phase; an airborne player with a
+        -- live timer is necessarily still waiting for the next landing.
+        jumpTimerAwaitingLanding = jumpTimer > 0 and not types.Actor.isOnGround(self)
+    end
 end
 
 -- Shows the movement transitions that gate landing, aerial, and jump effects.
@@ -257,10 +274,11 @@ local onConsoleCommand = SkillDebug.makeHandler({
                 SkillDebug.number(aerialStrikeWindow)
             ),
             string.format(
-                "Effects: chameleon=%s jumpStacks=%d jumpTimer=%s recentDamage=%s",
+                "Effects: chameleon=%s jumpStacks=%d jumpTimer=%s awaitingLanding=%s recentDamage=%s",
                 SkillDebug.number(chameleonTimer),
                 jumpStacks,
                 SkillDebug.number(jumpTimer),
+                tostring(jumpTimerAwaitingLanding),
                 SkillDebug.number(recentIncomingDamage)
             ),
         }
@@ -276,7 +294,7 @@ Common.registerStealthPerks(SKILL_ID, "Acrobatics", ids, {
     B2 = { localizedName = "Falling Star", localizedFlavour = "You turn descent into impact and impact into decision.", localizedDescription = "Aerial damage rises to 20%. The first attack shortly after landing deals 25% bonus damage instead.", onRemove = clearAcrobatics },
     C1 = { localizedName = "Evasive Roll", localizedFlavour = "You cross the enemy's sightline at the angle where certainty fails.", localizedDescription = "Jumping grants Chameleon 20% for 1 second.", onRemove = clearAcrobatics },
     C2 = { localizedName = "Vanishing Vault", localizedFlavour = "A leap, a shadow, and then the space where you were.", localizedDescription = "Evasive Roll increases to Chameleon 35%. If already sneaking when jumping, it lasts 2 seconds.", onRemove = clearAcrobatics },
-    D1 = { localizedName = "Momentum", localizedFlavour = "Each leap remembers the last and dares the next to go higher.", localizedDescription = "Each jump within 3 seconds grants +10 Jump per stack, up to 3 stacks.", onRemove = clearAcrobatics },
+    D1 = { localizedName = "Cloud Jump", localizedFlavour = "Each leap remembers the last and dares the next to go higher.", localizedDescription = "Each jump made within 3 seconds of landing grants +10 Jump per stack, up to 3 stacks.", onRemove = clearAcrobatics },
     D2 = { localizedName = "Sky-Hungry", localizedFlavour = "The ground becomes a suggestion. You keep refusing it.", localizedDescription = "Momentum stack cap rises to 5. At maximum stacks, gain +15 Speed.", onRemove = clearAcrobatics },
 })
 

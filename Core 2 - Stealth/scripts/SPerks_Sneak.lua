@@ -45,10 +45,18 @@ local phantomExtended = false
 local struckTargets = {}
 local combatTargets = {}
 local appliedSilentSpeed = 0
+local lastSilentMovement = nil
+local lastOpportunistDebug = nil
 
 local A_BONUS = { [1] = 5, [2] = 10, [3] = 15, [4] = 20 }
 local C_MULT = { [1] = 1.5, [2] = 2.0 }
 local D_CHAMELEON = { [1] = 40, [2] = 60 }
+
+local MIN_WALK_SPEED = tonumber(core.getGMST("fMinWalkSpeed")) or 100
+local MAX_WALK_SPEED = tonumber(core.getGMST("fMaxWalkSpeed")) or 300
+local ENCUMBERED_MOVE_EFFECT = tonumber(core.getGMST("fEncumberedMoveEffect")) or 0.5
+local SNEAK_SPEED_MULTIPLIER = tonumber(core.getGMST("fSneakSpeedMultiplier")) or 0.75
+SNEAK_SPEED_MULTIPLIER = math.max(0.05, math.min(1, SNEAK_SPEED_MULTIPLIER))
 
 local function aRank() return Common.rank(ids, "A") end
 local function bRank() return Common.rank(ids, "B") end
@@ -67,22 +75,67 @@ local function updateSneakBonus()
     effectTracker.apply("fortifyskill", SKILL_ID, value)
 end
 
--- Softens the movement penalty by adding Speed while sneaking.
+-- This inversion of Morrowind's walk-speed equation is adapted, with
+-- permission, from Ownlyme's Shadowdancer blessing in Roguelite. Solving for
+-- the required Speed modifier avoids the error produced by treating movement
+-- speed as directly proportional to the Speed attribute.
+local function calculateSilentSpeedBonus(rank, currentSpeed)
+    local capacity = tonumber(types.Actor.getCapacity(self)) or 0
+    local encumbrance = math.max(0, tonumber(types.Actor.getEncumbrance(self)) or 0)
+    local encumbranceRatio = capacity > 0 and math.min(1, encumbrance / capacity) or (encumbrance > 0 and 1 or 0)
+    local encumbranceFactor = math.max(0, 1 - ENCUMBERED_MOVE_EFFECT * encumbranceRatio)
+    local speedRange = MAX_WALK_SPEED - MIN_WALK_SPEED
+    if encumbranceFactor <= 0 or math.abs(speedRange) < 0.001 then
+        return 0, encumbranceRatio, 0, 0, currentSpeed
+    end
+
+    local normalWalkSpeed = math.max(0,
+        (MIN_WALK_SPEED + 0.01 * currentSpeed * speedRange) * encumbranceFactor)
+    local desiredMultiplier = rank >= 2
+        and 1
+        or ((1 + SNEAK_SPEED_MULTIPLIER) / 2)
+    local targetSneakSpeed = normalWalkSpeed * desiredMultiplier
+    local requiredWalkSpeed = targetSneakSpeed / SNEAK_SPEED_MULTIPLIER
+    local requiredUnencumberedSpeed = requiredWalkSpeed / encumbranceFactor
+    local requiredAttribute = (requiredUnencumberedSpeed - MIN_WALK_SPEED) / (0.01 * speedRange)
+    return math.max(0, math.ceil(requiredAttribute - currentSpeed)),
+        encumbranceRatio,
+        normalWalkSpeed,
+        targetSneakSpeed,
+        requiredAttribute
+end
+
+-- Offsets the engine's Sneak movement penalty without changing base Speed.
 local function updateSilentMovement()
     local rank = isSneaking() and bRank() or 0
     local value = 0
-    if rank > 0 and not Common.controlActive(self, "sprint") then
+    local state = {
+        rank = rank,
+        sneaking = isSneaking(),
+        sprinting = Common.controlActive(self, "sprint"),
+        swimming = types.Actor.isSwimming(self),
+    }
+    if rank > 0 and not state.swimming then
         local speed = types.Actor.stats.attributes.speed(self)
         local unmodifiedByPerk = math.max(0, (speed.modified or speed.base or 0) - appliedSilentSpeed)
-        local ok, gmst = pcall(core.getGMST, "fSneakSpeedMultiplier")
-        local sneakMultiplier = ok and tonumber(gmst) or 0.75
-        sneakMultiplier = math.max(0.05, math.min(1, sneakMultiplier))
-        local desiredMultiplier = rank >= 2 and 1 or ((1 + sneakMultiplier) / 2)
-        value = unmodifiedByPerk * ((desiredMultiplier / sneakMultiplier) - 1)
+        local encumbranceRatio, normalWalkSpeed, targetSneakSpeed, requiredAttribute
+        value, encumbranceRatio, normalWalkSpeed, targetSneakSpeed, requiredAttribute =
+            calculateSilentSpeedBonus(rank, unmodifiedByPerk)
+        state.currentSpeed = unmodifiedByPerk
+        state.encumbranceRatio = encumbranceRatio
+        state.normalWalkSpeed = normalWalkSpeed
+        state.requiredAttribute = requiredAttribute
+        state.targetSneakSpeed = targetSneakSpeed
     end
+    local previous = appliedSilentSpeed
     appliedSilentSpeed = value
     skillTracker.apply("attributes", "speed", value)
     effectTracker.apply("fortifyattribute", "speed", value)
+    state.appliedSpeed = value
+    lastSilentMovement = state
+    if math.abs(previous - value) >= 0.01 then
+        SkillDebug.traceEvent(SKILL_ID, "sneak movement compensation changed", state)
+    end
 end
 
 local function inCombat()
@@ -147,30 +200,46 @@ local function tickPhantom(dt)
     end
 end
 
---- Opportunist adds the missing share of the first unaware strike after the
---- target's normal post-armour damage has resolved.
+--- Marks the first unaware strike for Core 2's late damage resolver.
+--- The resolver runs after ordinary Framework arithmetic, allowing the
+--- multiplier to include other perk damage while retaining critical damage as
+--- the conceptual final stage.
 local function handleOutgoingHit(attack)
-    SkillDebug.traceEvent(SKILL_ID, "Opportunist check", {
-        successful = attack and attack.successful,
-        unaware = attack and Common.isUnawareHit(attack),
-    })
     local rank = cRank()
     local target = Common.attackTarget(attack)
+    local unaware = Common.isUnawareHit(attack)
+    lastOpportunistDebug = {
+        rank = rank,
+        successful = attack and attack.successful,
+        unaware = unaware,
+        target = SkillDebug.objectId(target),
+        baseDamage = Common.healthDamage(attack),
+    }
+    SkillDebug.traceEvent(SKILL_ID, "Opportunist check", {
+        successful = attack and attack.successful,
+        unaware = unaware,
+        rank = rank,
+        target = SkillDebug.objectId(target),
+    })
     if rank == 0 or attack.successful ~= true or not target or not target:isValid()
-        or not Common.isUnawareHit(attack) then
+        or not unaware then
+        lastOpportunistDebug.result = rank == 0 and "C chain inactive"
+            or attack.successful ~= true and "hit unsuccessful"
+            or (not target or not target:isValid()) and "target invalid"
+            or "target aware"
         return
     end
     local key = Common.targetKey(target)
     if not key or struckTargets[key] then
+        lastOpportunistDebug.result = not key and "target key unavailable"
+            or "already used against this target"
         return
     end
     struckTargets[key] = true
-    Common.applyBonusHealthDamage(
-        attack,
-        Common.healthDamage(attack) * (C_MULT[rank] - 1),
-        self,
-        ids["C" .. tostring(rank)],
-        "sneak.opportunist")
+    attack.skillPerksSneakOpportunistMultiplier = C_MULT[rank]
+    attack.skillPerksSneakOpportunistDebug = lastOpportunistDebug
+    lastOpportunistDebug.multiplier = C_MULT[rank]
+    lastOpportunistDebug.result = "queued for late damage resolution"
 end
 
 local routeOutgoingHit = Common.newOutgoingHitRouter(self, handleOutgoingHit)
@@ -193,6 +262,8 @@ local function clearSneakState()
     struckTargets = {}
     combatTargets = {}
     appliedSilentSpeed = 0
+    lastSilentMovement = nil
+    lastOpportunistDebug = nil
 end
 
 local function onUpdate(dt)
@@ -222,6 +293,8 @@ local function onLoad(data)
     -- permanently marked as already struck after combat state is rebuilt.
     struckTargets = {}
     combatTargets = {}
+    lastSilentMovement = nil
+    lastOpportunistDebug = nil
 end
 
 -- Shows sneak transitions, combat awareness, and first-strike target memory.
@@ -240,11 +313,34 @@ local onConsoleCommand = SkillDebug.makeHandler({
                 SkillDebug.number(phantomTimer),
                 tostring(phantomExtended)
             ),
+            lastSilentMovement and string.format(
+                "Sneak compensation: rank=%d sprinting=%s swimming=%s encumbrance=%.2f normalWalk=%.2f targetSneak=%.2f requiredSpeed=%.2f applied=%.2f",
+                tonumber(lastSilentMovement.rank) or 0,
+                tostring(lastSilentMovement.sprinting),
+                tostring(lastSilentMovement.swimming),
+                tonumber(lastSilentMovement.encumbranceRatio) or 0,
+                tonumber(lastSilentMovement.normalWalkSpeed) or 0,
+                tonumber(lastSilentMovement.targetSneakSpeed) or 0,
+                tonumber(lastSilentMovement.requiredAttribute) or 0,
+                tonumber(lastSilentMovement.appliedSpeed) or 0
+            ) or "Sneak compensation: no update observed.",
             string.format(
                 "Target memory: struck=%d combatTargets=%d",
                 SkillDebug.count(struckTargets),
                 SkillDebug.count(combatTargets)
             ),
+            lastOpportunistDebug and string.format(
+                "Opportunist: rank=%s target=%s success=%s unaware=%s base=%.2f multiplier=%s afterRegular=%s final=%s result=%s",
+                tostring(lastOpportunistDebug.rank),
+                tostring(lastOpportunistDebug.target),
+                tostring(lastOpportunistDebug.successful),
+                tostring(lastOpportunistDebug.unaware),
+                tonumber(lastOpportunistDebug.baseDamage) or 0,
+                tostring(lastOpportunistDebug.multiplier),
+                tostring(lastOpportunistDebug.afterRegularDamage),
+                tostring(lastOpportunistDebug.finalDamage),
+                tostring(lastOpportunistDebug.result)
+            ) or "Opportunist: no hit observed.",
         }
     end,
 })
@@ -254,8 +350,8 @@ Common.registerStealthPerks(SKILL_ID, "Sneak", ids, {
     A2 = { localizedName = "Soft Footfall", localizedFlavour = "Your steps stop asking the world for permission. Dust settles louder than you do.", localizedDescription = "Shadow Step increases to +10 Sneak.", onRemove = clearSneakState },
     A3 = { localizedName = "Held Breath", localizedFlavour = "You become a pause in the room: present, patient, and almost impossible to place.", localizedDescription = "Shadow Step increases to +15 Sneak.", onRemove = clearSneakState },
     A4 = { localizedName = "Absent Shape", localizedFlavour = "Even when eyes pass over you, they find nothing worth remembering.", localizedDescription = "Shadow Step increases to +20 Sneak.", onRemove = clearSneakState },
-    B1 = { localizedName = "Silenced Movement", localizedFlavour = "Caution no longer shackles you. You flow low and quiet, quick enough to matter.", localizedDescription = "While sneaking, half of the normal movement speed penalty is offset. Sprint remains penalized.", onRemove = clearSneakState },
-    B2 = { localizedName = "Noiseless Haste", localizedFlavour = "Speed and silence stop arguing. The dark makes room and you take it.", localizedDescription = "The normal sneaking movement penalty is fully offset. Sprint remains penalized.", onRemove = clearSneakState },
+    B1 = { localizedName = "Silenced Movement", localizedFlavour = "Caution no longer shackles you. You flow low and quiet, quick enough to matter.", localizedDescription = "While sneaking, half of the normal movement speed penalty is offset, including while sprinting.", onRemove = clearSneakState },
+    B2 = { localizedName = "Noiseless Haste", localizedFlavour = "Speed and silence stop arguing. The dark makes room and you take it.", localizedDescription = "The normal sneaking movement penalty is fully offset, including while sprinting.", onRemove = clearSneakState },
     C1 = { localizedName = "Opportunist", localizedFlavour = "The first wound is a thesis: precise, cruel, and delivered before the lesson begins.", localizedDescription = "The first unaware hit against a target deals 150% damage.", onRemove = clearSneakState },
     C2 = { localizedName = "Knife in the Quiet", localizedFlavour = "When you strike from nothing, the moment does not bend. It breaks.", localizedDescription = "Opportunist increases to 200% damage.", onRemove = clearSneakState },
     D1 = { localizedName = "Phantom", localizedFlavour = "You do not vanish. You teach the eye to doubt itself.", localizedDescription = "Entering sneak while in combat grants Chameleon 40% for 3 seconds.", onRemove = clearSneakState },

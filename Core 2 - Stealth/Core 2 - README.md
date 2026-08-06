@@ -37,8 +37,8 @@ Load those dependencies before `Core 2 SkillPerks.omwscripts`.
 - **C1 - Evasive Roll:** Jumping grants Chameleon 20% for one second.
 - **C2 - Vanishing Vault:** Chameleon rises to 35%; jumping while already
   sneaking extends it to two seconds.
-- **D1 - Momentum:** Jumps made within three seconds grant stacking +10 Jump,
-  up to three stacks.
+- **D1 - Cloud Jump:** Jumps made within three seconds of landing grant
+  stacking +10 Jump, up to three stacks.
 - **D2 - Sky-Hungry:** Stack cap rises to five and maximum stacks grant
   +15 Speed.
 
@@ -108,30 +108,33 @@ Load those dependencies before `Core 2 SkillPerks.omwscripts`.
 - **A2 - Weighted Coin:** Penalty rises to -10.
 - **A3 - Ledger Instinct:** Penalty rises to -15.
 - **A4 - Merchant's Knife:** Penalty rises to -20.
-- **B1 - Silver Tongue:** An accepted haggle applies a further -5 Mercantile
-  for that conversation.
-- **B2 - Pleasant Robbery:** Additional penalty rises to -10 and accepted
-  haggles grant +3 temporary disposition.
-- **C1 - Market Knowledge:** Inventory Extender barter prices improve by 5%
-  when buying or selling.
-- **C2 - Price Memory:** Barter-price improvement rises to 10%.
-- **D1 - Read the Room:** If starting disposition is below 50, the next
-  successful bribe has double effect.
-- **D2 - House Advantage:** The bribe has triple effect; merchants gain
-  temporary barter gold equal to five times your Mercantile advantage.
+- **B1 - Working Capital:** Merchants gain temporary barter gold equal to 10
+  times your base Mercantile plus Liquid Assets' bonus for the conversation.
+- **B2 - Deep Reserves:** Working Capital increases to 25 times your base
+  Mercantile plus Liquid Assets' bonus.
+- **C1 - Patronage:** 1% of the net gold you spend in a completed barter
+  permanently increases that merchant's barter gold.
+- **C2 - Commercial Roots:** Patronage invests 2.5% of your net spend.
+- **D1 - Liquid Assets:** Gain +1 Mercantile for every 10,000 gold of net
+  wealth.
+- **D2 - Golden Measure:** Also gain +1 Luck for every 25,000 gold of net
+  wealth. With Tamriel_Data installed, bank deposits and current stock value
+  count as wealth while outstanding bank loans reduce it.
 
 ### Security
 
-- **A1 - Deft Hands:** Failed lockpick condition loss is reduced by 20%.
-- **A2 - Soft Pressure:** Reduction rises to 40%.
-- **A3 - Patient Tension:** Reduction rises to 60%.
-- **A4 - Lock Whisperer:** Reduction rises to 80%.
+- **A1 - Deft Hands:** Lockpick uses have a 20% chance not to consume
+  durability.
+- **A2 - Soft Pressure:** Preservation chance rises to 40%.
+- **A3 - Patient Tension:** Preservation chance rises to 60%.
+- **A4 - Lock Whisperer:** Preservation chance rises to 80%.
 - **B1 - Pattern Recognition:** Failures on the same lock grant +5 Security
   for later attempts, stacking three times until success or changing locks.
 - **B2 - Known Mechanism:** Stack cap rises to six.
-- **C1 - Trap Mastery:** Failed probe wear is halved; successful disarms have
-  a 25% chance to preserve the use.
-- **C2 - Wire-Seer:** Successful-disarm preservation rises to 50%.
+- **C1 - Trap Mastery:** Failed probe attempts have a 25% chance not to consume
+  durability; successful attempts have a 50% chance.
+- **C2 - Wire-Seer:** Preservation chance rises to 50% on failure and 100% on
+  success.
 - **D1 - Master Locksmith:** Once per rest, activating a locked object attempts
   a normal Security roll at tool quality 1, regardless of held equipment.
 - **D2 - Hands Like Keys:** Allows two attempts per rest; a failed attempt
@@ -150,12 +153,15 @@ Load those dependencies before `Core 2 SkillPerks.omwscripts`.
 - **B2 - First Blood Lesson:** Bonus improves to Short Blade / 3 and doubles
   against an unaware target.
 - **C1 - Vital Strike:** Repeated hits on one target within five seconds gain
-  +3% damage per stack, up to five.
-- **C2 - Cruel Precision:** Cap rises to eight and timer to eight seconds.
-- **D1 - Bleed:** Hits apply up to three stacks dealing 1 Health per second
-  each for five seconds.
-- **D2 - Red Silence:** Cap rises to five; after reaching maximum stacks, the
-  next hit attempts a brief paralysis.
+  +4% damage per stack, up to five.
+- **C2 - Cruel Precision:** Vital Strike improves to +5% damage per stack, its
+  cap rises to eight, and its timer extends to eight seconds. Attacks at full
+  stacks attempt a half-damage shadow-hit after 0.1 seconds, carrying all on-hit
+  effects.
+- **D1 - Bleed:** Hits apply up to three stacks for five seconds. Each stack
+  deals 1% of the target's maximum Health per second, with a minimum of 1.
+- **D2 - Red Silence:** Cap rises to five. Attacks from five stacks onward
+  have a 10% chance to attempt one second of resistible Paralysis.
 
 ### Sneak
 
@@ -164,9 +170,9 @@ Load those dependencies before `Core 2 SkillPerks.omwscripts`.
 - **A3 - Held Breath:** Bonus rises to +15.
 - **A4 - Absent Shape:** Bonus rises to +20.
 - **B1 - Silenced Movement:** Offsets half of the normal sneak movement-speed
-  penalty; sprint remains penalized.
-- **B2 - Noiseless Haste:** Fully offsets normal sneak movement loss; sprint
-  remains penalized.
+  penalty, including while sprinting.
+- **B2 - Noiseless Haste:** Fully offsets normal sneak movement loss,
+  including while sprinting.
 - **C1 - Opportunist:** The first unaware hit against a target deals 150%
   damage.
 - **C2 - Knife in the Quiet:** Damage rises to 200%.
@@ -177,23 +183,19 @@ Load those dependencies before `Core 2 SkillPerks.omwscripts`.
 
 ### Speechcraft
 
-- **A1 - Compelling Voice:** A successful persuasion attempt grants +5
-  Speechcraft to the next attempt with that NPC during the conversation.
-- **A2 - Measured Praise:** Bonus rises to +10.
-- **A3 - Threaded Intent:** Bonus rises to +15 and carries across persuasion
-  types.
-- **A4 - Conversation's Crown:** Bonus rises to +20; three consecutive
-  successes grant a persistent +5 disposition once per conversation.
-- **B1 - Read the Crowd:** Failed persuasion does not reduce disposition.
-- **B2 - Recovery Line:** Failure against an NPC below 30 disposition grants
-  +10 Speechcraft to the next attempt.
-- **C1 - Lingering Words:** A conversation containing successful persuasion
-  leaves +5 disposition for 24 in-game hours.
-- **C2 - Remembered Grace:** Effect rises to +10 for 72 in-game hours.
-- **D1 - Commanding Presence:** Once per day, converts the next persuasion
-  attempt against a non-hostile NPC into a success.
-- **D2 - Voice of Office:** Available twice per day and doubles the successful
-  disposition gain.
+- **A1 - Compelling Voice:** Each successful persuasion attempt grants a
+  cumulative +5 Speechcraft for the current conversation, up to two stacks.
+- **A2 - Measured Praise:** Stack cap rises to four.
+- **A3 - Threaded Intent:** Stack cap rises to six.
+- **A4 - Conversation's Crown:** Stack cap rises to ten.
+- **B1 - Cutting Cadence:** Enemies fighting you within 5 metres suffer 15
+  points of Sound.
+- **B2 - Voice Above Steel:** Sound rises to 30 and reaches 15 metres.
+- **C1 - Plausible Account:** Newly incurred bounty is reduced by 20%.
+- **C2 - Unimpeachable Story:** Newly incurred bounty is reduced by 40%.
+- **D1 - Attentive Student:** Purchased training grants 25% progress toward
+  that skill's next level.
+- **D2 - Lessons Remembered:** Purchased training grants 50% progress instead.
 
 ## Detailed Perk Rules
 
@@ -210,14 +212,14 @@ the helmet, each pauldron, each gauntlet, and boots are worth 1 each.
   excluded from the estimated fall damage.
 - Rebounding Step's Speed burst uses the same significant-fall condition and
   lasts two seconds.
-- Acrobatic Strike works while airborne and for 1.5 seconds after beginning a
-  jump. Falling Star leaves a one-second landing window; its first attack uses
-  the 25% landing bonus instead of the ordinary 20% aerial bonus.
+- Acrobatic Strike works while airborne, then its 1.5-second grace period
+  begins upon landing. Falling Star uses a one-second landing window; its first
+  attack uses the 25% landing bonus instead of the ordinary 20% aerial bonus.
 - Evasive Roll starts when the jump begins. Vanishing Vault lasts two seconds
   only when Sneak was already held at that moment.
-- Acrobatics Momentum gains one stack per jump and refreshes a shared
-  three-second expiry. Every stack grants +10 Jump; all stacks clear when the
-  timer expires.
+- Cloud Jump gains one stack per jump and refreshes a shared three-second
+  expiry. The timer remains paused in the air and begins upon landing. Every
+  stack grants +10 Jump; all stacks clear when the timer expires.
 
 ### Hand-to-Hand Details
 
@@ -273,27 +275,33 @@ the helmet, each pauldron, each gauntlet, and boots are worth 1 each.
 
 ### Mercantile Details
 
-- Sharp Eye applies only to NPCs who offer merchant services. Its penalty and
-  Silver Tongue's additional penalty are temporary and are removed when the
+- Sharp Eye applies only to NPCs who offer merchant services. Its penalty is
+  temporary and only the exact SkillPerks contribution is removed when the
   conversation closes.
-- Pleasant Robbery's +3 disposition is granted for each accepted haggle and
-  all of that temporary disposition is removed at conversation end.
-- Market Knowledge changes the live offer symmetrically: goods sold improve
-  by 5% or 10%, while purchases become 5% or 10% cheaper.
-- Read the Room arms one bribe only when the merchant's starting disposition
-  is below 50. The first successful bribe doubles or triples the disposition
-  it would have granted, then consumes the benefit.
-- House Advantage adds temporary barter gold equal to five times the positive
-  difference between the player's and merchant's modified Mercantile skills.
-  It never removes gold when the merchant has the advantage, and the added
-  gold is removed when the conversation closes.
+- Working Capital uses base Mercantile plus only the bonus from Liquid Assets.
+  Spells, enchantments, and other Mercantile modifiers do not increase it. At
+  100 base Mercantile before Liquid Assets, it adds 1,000 barter gold at B1 or
+  2,500 at B2, then removes that temporary gold at conversation end without
+  overwriting bonuses from other mods.
+- Patronage counts the net gold paid in each accepted barter. Selling items
+  back in the same transaction reduces the qualifying spend. Investments
+  below one whole gold round down and do not apply.
+- Each merchant keeps a separate cumulative investment. SkillPerks restores
+  its own recorded bonus after a normal barter-gold restock or save load and
+  never replaces the merchant's whole gold value.
+- Liquid Assets counts carried gold. Golden Measure also recognizes the
+  documented Tamriel_Data Banking Framework deposits and Stock Exchange
+  portfolio values, then subtracts outstanding bank loans.
+- Wealth is recalculated when the perk is applied, after opening barter, every
+  new in-game day, and every 20 seconds of unpaused play. Stat modifiers are
+  changed only when a wealth tier changes and are reported through AAM.
 
 ### Security Details
 
 - Pattern Recognition grants +5 Security after each failed attempt on the same
   lock. Success or selecting a different lock clears every stack.
-- Trap Mastery always refunds half of condition lost by a failed probe use.
-  Its 25% or 50% successful-disarm preservation roll is separate.
+- Deft Hands rolls after every observed lockpick use. Trap Mastery rolls after
+  every probe use; successful disarms receive its higher preservation chance.
 - A probe or lockpick that is destroyed by spending its final use may cease to
   exist before a preservation effect can return that use.
 - Master Locksmith triggers when activating a locked object, regardless of
@@ -310,22 +318,36 @@ the helmet, each pauldron, each gauntlet, and boots are worth 1 each.
   dropping the entire stack at once.
 - Opening Strike becomes available again after that target leaves combat with
   the player. First Blood Lesson doubles only its flat Short Blade-based bonus,
-  not the whole weapon hit.
-- Vital Strike adds 3% of the current post-armor hit per existing stack, then
-  adds the new stack. Changing targets clears the previous target's sequence.
-- Bleed deals direct Health damage once per second equal to its current stack
-  count. New hits add a stack and refresh the shared five-second duration.
-- Red Silence marks the stack when it first reaches five. The following hit,
-  not the fifth-stack hit, attempts one second of resistible Paralysis.
+  not the whole weapon hit. The flat bonus resolves after ordinary damage
+  calculations, is included in Opportunist or Knife in the Quiet, receives
+  First Blood Lesson's unaware doubling, and then receives the melee critical
+  multiplier.
+- Vital Strike adds 4% of the current post-armor hit per existing stack, then
+  adds the new stack. Cruel Precision raises this to 5%. Changing targets
+  clears the previous target's sequence.
+- At eight stacks, Cruel Precision makes a separate hit roll after each attack.
+  A successful shadow-hit resolves 0.1 seconds later, begins at half the
+  triggering hit's resolved damage, then passes through the shared outgoing
+  on-hit pipeline. Its internal marker prevents it from generating another
+  shadow-hit. It repeats the triggering impact sound at 25% volume when the
+  delayed strike lands.
+- Bleed deals direct Health damage once per second equal to 1% of the target's
+  maximum Health per stack, with a one-damage minimum for each stack. New hits
+  add a stack and refresh the shared five-second duration.
+- At five stacks, Red Silence rolls its 10% paralysis chance on every further
+  hit, including the hit that reaches five. Successful rolls still face the
+  target's natural paralysis resistance and cannot stack with active Paralysis.
 
 ### Sneak Details
 
 - Silenced Movement and Noiseless Haste calculate enough Speed to offset half
-  or all of the game's normal Sneak movement multiplier. Neither offsets the
-  sprint penalty.
+  or all of the game's normal Sneak movement multiplier. Their compensation
+  remains active while sprinting.
 - Opportunist is available once per target per combat encounter and requires
   the target to be unaware when hit. The bonus is based on damage remaining
-  after normal armor resolution.
+  after normal armour and other Framework damage resolution. Opening Strike is
+  added immediately before this multiplier; First Blood Lesson's unaware
+  doubling follows it, with critical scaling represented last.
 - Phantom starts only when the player newly enters Sneak while an actor is
   actively fighting them. Vanishing Point can gain its five-second extension
   once, only if all such combat targeting ends during the original
@@ -333,20 +355,20 @@ the helmet, each pauldron, each gauntlet, and boots are worth 1 each.
 
 ### Speechcraft Details
 
-- Compelling Voice's bonus is consumed by the next observed persuasion
-  attempt, whether that attempt succeeds or fails. A new success prepares the
-  next bonus.
-- Conversation's Crown requires three successes without an intervening
-  failure and can award its permanent +5 disposition only once per
-  conversation.
-- Read the Crowd reverses the normal disposition loss from failure. Recovery
-  Line then prepares +10 Speechcraft only if disposition is below 30.
-- Lingering Words and Remembered Grace replace their own previous bonus on the
-  NPC rather than stacking repeatedly. Their duration uses in-game time.
-- Commanding Presence works only while the NPC's Fight value is below 70. It
-  converts a failed attempt into an equal positive gain. Voice of Office also
-  doubles an already successful attempt. Uses reset when the in-game day
-  changes.
+- Compelling Voice gains one +5 Speechcraft stack after each observed
+  successful persuasion. Failures do not remove stacks; every stack clears
+  when the conversation closes. The temporary skill bonus is reported through
+  AAM.
+- Cutting Cadence and Voice Above Steel affect only actors currently fighting
+  the player and inside the stated radius. Each target receives one named
+  Sound modifier that is replaced and refreshed, never stacked repeatedly.
+- Plausible Account and Unimpeachable Story affect only the newly added part of
+  a bounty. Existing bounty is untouched, and reductions are rounded down to
+  whole gold.
+- Attentive Student and Lessons Remembered detect a base-skill increase while
+  the Training interface is open, then add progress to that same skill. The
+  bonus is capped just below a full level, so it cannot grant another instant
+  skill rank or bypass the trainer limit.
 
 ## Console Commands
 
@@ -365,6 +387,11 @@ Enter these directly into the normal OpenMW console:
 Each command reports the skill's owned chain ranks and relevant live state,
 including movement windows, target memory, stacks, cooldowns, equipment,
 conversation state, or lock tracking where applicable.
+
+Mercantile diagnostics include the last merchant modifiers, completed barter,
+investment-restock decision, and full net-wealth tier calculation. Speechcraft
+diagnostics include the last persuasion result, combat Sound refresh, bounty
+reduction calculation, and purchased-training progress delivery.
 
 Append ` trace` to any command to toggle its live activation trace, such as
 `luah2h debug trace`. Trace output requires SkillPerks verbosity `3`; enter
@@ -394,3 +421,7 @@ inventory-facing effects.
 
 A lockpick or probe that spends its final remaining use may break before a
 preservation effect can return that use.
+
+Silenced Movement and Noiseless Haste use movement-formula work adapted, with
+permission, from Ownlyme's Shadowdancer blessing in Roguelite. Roguelite is
+not required.

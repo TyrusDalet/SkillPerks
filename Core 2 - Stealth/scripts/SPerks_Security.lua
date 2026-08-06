@@ -18,6 +18,9 @@ local interfaces = require("openmw.interfaces")
 local types      = require("openmw.types")
 local self       = require("openmw.self")
 local ui         = require("openmw.ui")
+local camera     = require("openmw.camera")
+local nearby     = require("openmw.nearby")
+local util       = require("openmw.util")
 
 local Common      = require("scripts.SkillPerks.stealth.common")
 local CombatMath  = require("scripts.SkillPerks.shared.combat_math")
@@ -37,10 +40,16 @@ local masterLocksmithUses = 0
 local registeredIE = false
 local reportedMasteryRank = -1
 local reportedMasteryUses = -1
+local lastToolResult = nil
+local pendingConditionSeconds = 0
+local lastAimedLockId = nil
 
-local A_REDUCTION = { [1] = 0.20, [2] = 0.40, [3] = 0.60, [4] = 0.80 }
+local A_PRESERVE = { [1] = 0.20, [2] = 0.40, [3] = 0.60, [4] = 0.80 }
 local B_CAP = { [1] = 3, [2] = 6 }
-local C_PRESERVE = { [1] = 0.25, [2] = 0.50 }
+local C_PRESERVE_FAILED = { [1] = 0.25, [2] = 0.50 }
+local C_PRESERVE_SUCCEEDED = { [1] = 0.50, [2] = 1.00 }
+local TARGET_GRACE_SECONDS = 0.20
+local MAX_ACTIVATE_DISTANCE = (tonumber(core.getGMST("iMaxActivateDist")) or 192) + 0.1
 
 local function aRank() return Common.rank(ids, "A") end
 local function bRank() return Common.rank(ids, "B") end
@@ -54,6 +63,7 @@ local function rememberTool(item)
     if not types.Lockpick.objectIsInstance(item) and not types.Probe.objectIsInstance(item) then
         return
     end
+    local changedTool = not trackedTool or trackedTool.item ~= item
     local itemData = types.Item.itemData(item)
     trackedTool = itemData and itemData.condition and {
         item = item,
@@ -61,6 +71,11 @@ local function rememberTool(item)
         isLockpick = types.Lockpick.objectIsInstance(item),
         isProbe = types.Probe.objectIsInstance(item),
     } or nil
+    if changedTool then
+        pendingConditionSeconds = 0
+        targetedLock = nil
+        lastAimedLockId = nil
+    end
 end
 
 local function registerInventoryExtender()
@@ -77,6 +92,59 @@ local function registerInventoryExtender()
         end
         return true
     end)
+end
+
+-- Lockpicks and probes use the attack/use action rather than ordinary object
+-- activation. Cache the object under the crosshair before condition changes
+-- so the later durability poll can distinguish success from failure.
+local function captureAimedLock()
+    local held = types.Actor.getEquipment(self, types.Actor.EQUIPMENT_SLOT.CarriedRight)
+    if not held or (not types.Lockpick.objectIsInstance(held) and not types.Probe.objectIsInstance(held)) then
+        lastAimedLockId = nil
+        return
+    end
+
+    local cameraPosition = camera.getPosition()
+    local distance = MAX_ACTIVATE_DISTANCE + math.max(0, tonumber(camera.getThirdPersonDistance()) or 0)
+    local ray = nearby.castRenderingRay(
+        cameraPosition,
+        cameraPosition + camera.viewportToWorldVector(util.vector2(0.5, 0.5)) * distance,
+        { ignore = self }
+    )
+    local target = ray and ray.hitObject
+    if not target or not target:isValid() or not types.Lockable.objectIsInstance(target) then
+        lastAimedLockId = nil
+        return
+    end
+
+    local targetId = tostring(target.id)
+    local wasLocked = types.Lockable.isLocked(target)
+    local hadTrap = types.Lockable.getTrapSpell(target) ~= nil
+    if not wasLocked and not hadTrap then
+        return
+    end
+
+    if not targetedLock or not targetedLock.target or tostring(targetedLock.target.id) ~= targetId then
+        targetedLock = {
+            target = target,
+            wasLocked = wasLocked,
+            hadTrap = hadTrap,
+            lockLevel = types.Lockable.getLockLevel(target),
+        }
+    else
+        -- Preserve the pre-attempt state if the engine has already unlocked
+        -- or disarmed the same object before this frame's condition poll.
+        targetedLock.wasLocked = targetedLock.wasLocked or wasLocked
+        targetedLock.hadTrap = targetedLock.hadTrap or hadTrap
+    end
+    if lastAimedLockId ~= targetId then
+        SkillDebug.traceEvent(SKILL_ID, "tool target acquired", {
+            target = targetId,
+            trapped = hadTrap,
+            locked = wasLocked,
+        })
+        lastAimedLockId = targetId
+    end
 end
 
 local function updatePatternBonus()
@@ -118,10 +186,10 @@ local function currentTargetResult(tool)
     return nil, tostring(target.id)
 end
 
--- Restores only the wear covered by the relevant success/failure rule. The
--- write is global because carried item condition cannot be changed directly
--- by a player script.
-local function reconcileToolCondition()
+-- Rolls after OpenMW spends a tool use, then restores the entire loss when
+-- the relevant preservation perk succeeds. The write is global because a
+-- player script cannot directly change carried item condition.
+local function reconcileToolCondition(dt)
     if not trackedTool or not trackedTool.item or not trackedTool.item:isValid() then
         trackedTool = nil
         return
@@ -134,19 +202,29 @@ local function reconcileToolCondition()
     local loss = trackedTool.condition - itemData.condition
     if loss <= 0 then
         trackedTool.condition = itemData.condition
+        pendingConditionSeconds = 0
         return
     end
 
     local restore = 0
+    local preservedUse = false
+    local preserveChance = 0
+    local preserveRoll = nil
     local succeeded, lockId = currentTargetResult(trackedTool)
-    SkillDebug.traceEvent(SKILL_ID, "tool result observed", {
-        lock = lockId,
-        loss = loss,
-        succeeded = succeeded,
-    })
+    if succeeded == nil then
+        pendingConditionSeconds = pendingConditionSeconds + math.max(0, tonumber(dt) or 0)
+        if pendingConditionSeconds < TARGET_GRACE_SECONDS then
+            return
+        end
+    end
+    pendingConditionSeconds = 0
     if trackedTool.isLockpick then
+        preserveChance = A_PRESERVE[aRank()] or 0
+        if preserveChance > 0 then
+            preserveRoll = math.random()
+            preservedUse = preserveRoll < preserveChance
+        end
         if succeeded == false then
-            restore = restore + loss * (A_REDUCTION[aRank()] or 0)
             addPatternStack(lockId)
         elseif succeeded == true then
             clearPattern()
@@ -154,22 +232,42 @@ local function reconcileToolCondition()
     elseif trackedTool.isProbe then
         local rank = cRank()
         if rank > 0 then
-            if succeeded == false then
-                restore = restore + loss * 0.50
-            elseif succeeded == true and math.random() < C_PRESERVE[rank] then
-                restore = restore + loss
-            end
+            preserveChance = succeeded == true
+                and C_PRESERVE_SUCCEEDED[rank]
+                or C_PRESERVE_FAILED[rank]
+            preserveRoll = math.random()
+            preservedUse = preserveRoll < preserveChance
         end
     end
 
-    if restore > 0 then
+    if preservedUse then
+        restore = loss
         core.sendGlobalEvent("SPerks_ModifyItemCondition", {
             item = trackedTool.item,
             amount = restore,
         })
+        if trackedTool.isLockpick then
+            ui.showMessage("Your deft hands preserve the lockpick.")
+        else
+            ui.showMessage("Your careful hand preserves the probe.")
+        end
     end
+    lastToolResult = {
+        chance = preserveChance,
+        aRank = aRank(),
+        cRank = cRank(),
+        lock = lockId,
+        loss = loss,
+        preserved = preservedUse,
+        roll = preserveRoll,
+        succeeded = succeeded,
+        targetKnown = succeeded ~= nil,
+        tool = trackedTool.isLockpick and "lockpick" or "probe",
+    }
+    SkillDebug.traceEvent(SKILL_ID, "tool durability resolved", lastToolResult)
     trackedTool.condition = itemData.condition + restore
     targetedLock = nil
+    lastAimedLockId = nil
 end
 
 
@@ -265,6 +363,8 @@ local function clearSecurity()
     masterLocksmithUses = 0
     reportedMasteryRank = -1
     reportedMasteryUses = -1
+    pendingConditionSeconds = 0
+    lastAimedLockId = nil
     reportMasteryState()
 end
 
@@ -275,7 +375,7 @@ local function onUpdate(dt)
             and (not trackedTool or trackedTool.item ~= held) then
         rememberTool(held)
     end
-    reconcileToolCondition()
+    reconcileToolCondition(dt)
     reportMasteryState()
 end
 
@@ -303,6 +403,9 @@ local function onLoad(data)
     registeredIE = false
     reportedMasteryRank = -1
     reportedMasteryUses = -1
+    lastToolResult = nil
+    pendingConditionSeconds = 0
+    lastAimedLockId = nil
     updatePatternBonus()
 end
 
@@ -328,19 +431,31 @@ local onConsoleCommand = SkillDebug.makeHandler({
                 tostring(registeredIE),
                 reportedMasteryRank
             ),
+            lastToolResult and string.format(
+                "Last durability roll: tool=%s targetKnown=%s success=%s A=%d C=%d loss=%.2f chance=%.2f roll=%s preserved=%s",
+                tostring(lastToolResult.tool),
+                tostring(lastToolResult.targetKnown),
+                tostring(lastToolResult.succeeded),
+                tonumber(lastToolResult.aRank) or 0,
+                tonumber(lastToolResult.cRank) or 0,
+                tonumber(lastToolResult.loss) or 0,
+                tonumber(lastToolResult.chance) or 0,
+                lastToolResult.roll and string.format("%.2f", lastToolResult.roll) or "none",
+                tostring(lastToolResult.preserved)
+            ) or "Last durability roll: none observed.",
         }
     end,
 })
 
 Common.registerStealthPerks(SKILL_ID, "Security", ids, {
-    A1 = { localizedName = "Deft Hands", localizedFlavour = "A failed pick is not wasted if your fingers remember why it failed.", localizedDescription = "Lockpick condition loss on a failed attempt is reduced by 20%.", onRemove = clearSecurity },
-    A2 = { localizedName = "Soft Pressure", localizedFlavour = "You stop forcing the lock and begin listening to it complain.", localizedDescription = "Deft Hands improves to 40% reduced condition loss on failure.", onRemove = clearSecurity },
-    A3 = { localizedName = "Patient Tension", localizedFlavour = "Pins move because you asked correctly, not because you pushed harder.", localizedDescription = "Deft Hands improves to 60% reduced condition loss on failure.", onRemove = clearSecurity },
-    A4 = { localizedName = "Lock Whisperer", localizedFlavour = "The mechanism gives up secrets before it gives up steel.", localizedDescription = "Deft Hands improves to 80% reduced condition loss on failure.", onRemove = clearSecurity },
+    A1 = { localizedName = "Deft Hands", localizedFlavour = "A failed pick is not wasted if your fingers remember why it failed.", localizedDescription = "Lockpick uses have a 20% chance not to consume durability.", onRemove = clearSecurity },
+    A2 = { localizedName = "Soft Pressure", localizedFlavour = "You stop forcing the lock and begin listening to it complain.", localizedDescription = "Deft Hands' preservation chance rises to 40%.", onRemove = clearSecurity },
+    A3 = { localizedName = "Patient Tension", localizedFlavour = "Pins move because you asked correctly, not because you pushed harder.", localizedDescription = "Deft Hands' preservation chance rises to 60%.", onRemove = clearSecurity },
+    A4 = { localizedName = "Lock Whisperer", localizedFlavour = "The mechanism gives up secrets before it gives up steel.", localizedDescription = "Deft Hands' preservation chance rises to 80%.", onRemove = clearSecurity },
     B1 = { localizedName = "Pattern Recognition", localizedFlavour = "Every failed turn maps another tooth of the lock in your mind.", localizedDescription = "Each failed attempt on the same lock grants +5 Security for later attempts, up to 3 stacks. Stacks end on success or when you change locks.", onRemove = clearSecurity },
     B2 = { localizedName = "Known Mechanism", localizedFlavour = "By the final attempt, the lock feels less like an obstacle than an old argument.", localizedDescription = "Pattern Recognition stack cap rises to 6.", onRemove = clearSecurity },
-    C1 = { localizedName = "Trap Mastery", localizedFlavour = "A trap is only a threat until you learn where its patience ends.", localizedDescription = "Probe condition loss on a failed disarm is reduced by 50%. Successful disarms have a 25% chance to preserve the use.", onRemove = clearSecurity },
-    C2 = { localizedName = "Wire-Seer", localizedFlavour = "You read pressure, spring, and poison as if the trap wrote them down for you.", localizedDescription = "Trap Mastery's successful-disarm preservation chance rises to 50%.", onRemove = clearSecurity },
+    C1 = { localizedName = "Trap Mastery", localizedFlavour = "A trap is only a threat until you learn where its patience ends.", localizedDescription = "Failed probe attempts have a 25% chance not to consume durability; successful attempts have a 50% chance.", onRemove = clearSecurity },
+    C2 = { localizedName = "Wire-Seer", localizedFlavour = "You read pressure, spring, and poison as if the trap wrote them down for you.", localizedDescription = "Trap Mastery's preservation chance rises to 50% on failure and 100% on success.", onRemove = clearSecurity },
     D1 = { localizedName = "Master Locksmith", localizedFlavour = "Tools help, but mastery begins when every lock answers to your touch.", localizedDescription = "Once per rest, activating a locked object attempts to open it using a normal Security roll with tool quality 1. Failure has no penalty.", onRemove = clearSecurity },
     D2 = { localizedName = "Hands Like Keys", localizedFlavour = "Some locks open because metal meets metal. Others open because you have learned their name.", localizedDescription = "Master Locksmith can be attempted twice per rest. A failed attempt permanently reduces the lock's level by 25%.", onRemove = clearSecurity },
 })
@@ -355,6 +470,7 @@ return {
     },
     engineHandlers = {
         onConsoleCommand = onConsoleCommand,
+        onFrame = captureAimedLock,
         onUpdate = onUpdate,
         onSave = onSave,
         onLoad = onLoad,
