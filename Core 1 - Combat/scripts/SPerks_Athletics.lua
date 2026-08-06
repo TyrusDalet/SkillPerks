@@ -41,6 +41,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 ]]
 
 local ns          = require("scripts.SkillPerks.namespace")
+local core        = require("openmw.core")
 local interfaces  = require("openmw.interfaces")
 local types       = require("openmw.types")
 local self        = require("openmw.self")
@@ -182,6 +183,66 @@ end
 -- flooring every tick - see the design doc's own recovery formula, which
 -- is expressed as a continuous points/second rate, not a per-tick amount.
 local fatigueRegenAccumulator = 0
+
+-- Some OpenMW 0.51 installations display a positive Fatigue modifier but
+-- still stop ordinary idle regeneration at fatigue.base. Detect that stall
+-- before supplying only the missing vanilla regeneration above the old cap.
+-- The delay prevents this compatibility path from doubling regeneration on
+-- installations where the engine already honours fatigue.modifier normally.
+local FATIGUE_RETURN_BASE = tonumber(core.getGMST("fFatigueReturnBase")) or 2.5
+local FATIGUE_RETURN_MULT = tonumber(core.getGMST("fFatigueReturnMult")) or 0.02
+local IDLE_CAP_STALL_DELAY = 0.25
+local idleCapLastCurrent = nil
+local idleCapStalledFor = 0
+local idleCapBridgeActive = false
+local idleCapBridgeRate = 0
+
+local function resetIdleCapBridge()
+    idleCapLastCurrent = nil
+    idleCapStalledFor = 0
+    idleCapBridgeActive = false
+    idleCapBridgeRate = 0
+end
+
+--- Extends vanilla idle Fatigue return through an Athletics-owned modifier
+--- only when OpenMW has demonstrably stalled at the unmodified base ceiling.
+--- @param dt number Simulation time elapsed in seconds.
+local function tickIdleCapBridge(dt)
+    if getARank() == 0 or isMoving() then
+        resetIdleCapBridge()
+        return
+    end
+
+    local fatigue = types.Actor.stats.dynamic.fatigue(self)
+    local baseCeiling = tonumber(fatigue.base) or 0
+    local maximum = baseCeiling + (tonumber(fatigue.modifier) or 0)
+    local current = tonumber(fatigue.current) or 0
+    if maximum <= baseCeiling or current < baseCeiling - 0.01 or current >= maximum then
+        resetIdleCapBridge()
+        return
+    end
+
+    if idleCapLastCurrent == nil or math.abs(current - idleCapLastCurrent) > 0.01 then
+        idleCapLastCurrent = current
+        idleCapStalledFor = 0
+        idleCapBridgeActive = false
+        idleCapBridgeRate = 0
+        return
+    end
+
+    idleCapStalledFor = idleCapStalledFor + dt
+    if idleCapStalledFor < IDLE_CAP_STALL_DELAY then
+        return
+    end
+
+    local endurance = types.Actor.stats.attributes.endurance(self)
+    local rate = math.max(0, FATIGUE_RETURN_BASE
+        + FATIGUE_RETURN_MULT * (tonumber(endurance.modified) or 0))
+    fatigue.current = math.min(current + rate * dt, maximum)
+    idleCapLastCurrent = fatigue.current
+    idleCapBridgeActive = true
+    idleCapBridgeRate = rate
+end
 
 local function getFatigueRegenRate(rank, currentFatigue, maxFatigue)
     local rankData = A_RANK_DATA[rank]
@@ -487,6 +548,7 @@ local RECALC_INTERVAL = 1.0
 
 local function onUpdate(dt)
     tickFatigueRegen(dt)
+    tickIdleCapBridge(dt)
     tickDChain(dt)
 
     recalcTimer = recalcTimer - dt
@@ -540,6 +602,7 @@ local function onLoad(data)
     dStackCount = 0
     dContinuousMoveTimer = 0
     dStoppedTimer = 0
+    resetIdleCapBridge()
 
     secondWindUsed = data.secondWindUsed or false
 end
@@ -593,6 +656,12 @@ local function onConsoleCommand(mode, command)
         .. " modifier=" .. tostring(agility.modifier)
         .. " modified=" .. tostring(agility.modified)
         .. ")")
+    consolePrint("Athletics idle cap bridge:"
+        .. " active=" .. tostring(idleCapBridgeActive)
+        .. " stalledFor=" .. tostring(idleCapStalledFor)
+        .. " rate=" .. tostring(idleCapBridgeRate)
+        .. " vanillaRate=" .. tostring(FATIGUE_RETURN_BASE
+            + FATIGUE_RETURN_MULT * types.Actor.stats.attributes.endurance(self).modified))
 end
 
 -- ============================================================
