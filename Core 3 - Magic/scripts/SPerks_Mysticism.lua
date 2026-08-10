@@ -20,6 +20,7 @@ local ids = Common.ids("mysticism")
 local effects = StatTracker.newActiveEffectTracker(self)
 local updateTimer = 0
 local echoedTargets = {}
+local trackedActiveSpells = Common.newTrackedSpellCache({"telekinesis"})
 
 local function rank(chain) return Common.rank(ids, chain) end
 
@@ -143,7 +144,9 @@ local function onActorActivated(data)
     })
     if d == 0 then return trace:reject("D chain inactive") end
     if not target or not target:isValid() then return trace:reject("target unavailable") end
-    local telekinesis=Common.playerSpellEffectMagnitude(self, "telekinesis")
+    local telekinesis=Common.playerSpellEffectMagnitude(
+        self, "telekinesis", nil, trackedActiveSpells
+    )
     if telekinesis <= 0 then
         return trace:reject("no qualifying player-cast Telekinesis",{magnitude=telekinesis})
     end
@@ -210,6 +213,7 @@ local onConsoleCommand = SkillDebug.makeHandler({
             string.format("Echoed targets=%d updateTimer=%s", SkillDebug.count(echoedTargets), SkillDebug.number(updateTimer)),
             "Magicka: " .. SkillDebug.resourceSummary(self, "magicka"),
             "Fatigue: " .. SkillDebug.resourceSummary(self, "fatigue"),
+            "Tracked Telekinesis spells=" .. tostring(trackedActiveSpells.count()),
         }
     end,
 })
@@ -225,6 +229,15 @@ Common.registerMagicPerks("mysticism", "Mysticism", ids, {
     C2={localizedName="Abyssal Appetite",localizedFlavour="The less power remains yours, the more eagerly your soul devours another's.",localizedDescription="Hungry Soul's cap increases to 50%.",onAdd=refreshHungrySoul,onRemove=clear},
     D1={localizedName="Telekinetic Force",localizedFlavour="Telekinesis was never merely the art of touching distant objects.",localizedDescription="While Telekinesis is active, activating a hostile actor spends 25 Magicka, drains Fatigue, and staggers them.",onRemove=clear},
     D2={localizedName="Invisible Hammer",localizedFlavour="Distance becomes leverage. Will becomes impact.",localizedDescription="Cost falls to 15 Magicka; targets that fail a Willpower and Fatigue resistance roll are knocked down.",onRemove=clear},
+})
+
+interfaces.ErnPerkFramework.registerSkillUseHandler({
+    id = "SkillPerks_mysticism_active_effect_tracking",
+    skill = "mysticism",
+    playerCastOnly = true,
+    handler = function(event)
+        trackedActiveSpells.track(event and event.spell)
+    end,
 })
 
 return {
@@ -260,7 +273,16 @@ return {
     engineHandlers = {
         onConsoleCommand=onConsoleCommand,
         onUpdate=onUpdate,
-        onSave=function() return { effects=effects.snapshot() } end,
-        onLoad=function(data) effects.restoreAndReverse(data and data.effects) echoedTargets={} end,
+        onSave=function()
+            return {
+                effects=effects.snapshot(),
+                activeSpells=trackedActiveSpells.snapshotData(),
+            }
+        end,
+        onLoad=function(data)
+            effects.restoreAndReverse(data and data.effects)
+            trackedActiveSpells.restore(data and data.activeSpells)
+            echoedTargets={}
+        end,
     },
 }

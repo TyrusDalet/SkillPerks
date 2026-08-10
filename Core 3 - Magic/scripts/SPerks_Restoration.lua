@@ -37,6 +37,7 @@ local spellforgeSnapshots = {}
 local spellforgeAuthorized = {}
 local spellforgeInstantHandled = {}
 local pendingSpellforgeCast = nil
+local restoreSpells = Common.newTrackedSpellCache({"restorehealth","restorefatigue"})
 
 local function rank(chain) return Common.rank(ids, chain) end
 local function maximum(resource)
@@ -175,6 +176,7 @@ interfaces.ErnPerkFramework.registerSkillUseHandler({
                 })
             end
         end
+        restoreSpells.track(event.spell)
         debugState.lastCast = {
             id=event.spell and event.spell.id or nil,
             name=event.spell and event.spell.name or nil,
@@ -238,37 +240,33 @@ interfaces.ErnPerkFramework.registerSkillUseHandler({
 --- avoids traversing the ActiveSpells collection separately for each resource.
 local function playerRestoreRates()
     local rates = {health=0,fatigue=0}
-    local now = core.getSimulationTime()
-    for _, spell in pairs(types.Actor.activeSpells(self)) do
-        local spellId = tostring(spell.id or "")
-        local qualifies = Common.isPlayerCastActiveSpell(self, spell)
-            or (spellforgeAuthorized[spellId] or 0) >= now
-        local instantHandled = (spellforgeInstantHandled[spellId] or 0) >= now
-        for _, effect in pairs(spell.effects or {}) do
-            local resource = effect.id == "restorehealth" and "health"
-                or effect.id == "restorefatigue" and "fatigue" or nil
-            if resource then
-                local source = MagicDetection.describeActiveSpellSource(self, spell)
-                source.spellforgeAuthorized = (spellforgeAuthorized[spellId] or 0) >= now
-                source.spellforgeInstantHandled = instantHandled
-                source.effectId = effect.id
-                source.magnitude = effect.magnitudeThisFrame
-                source.duration = effect.duration
-                source.durationLeft = effect.durationLeft
-                source.qualifies = qualifies
-                debugState.lastRestoreEffect = source
-                if qualifies and not instantHandled then
-                    rates[resource] = rates[resource]
-                        + math.max(0, tonumber(effect.magnitudeThisFrame) or 0)
-                end
-            end
-        end
-    end
+    local snapshot, diagnostics = Common.playerSpellEffectSnapshot(
+        self,
+        {"restorehealth","restorefatigue"},
+        restoreSpells
+    )
+    rates.health = math.max(0, tonumber(snapshot.restorehealth and snapshot.restorehealth.magnitude) or 0)
+    rates.fatigue = math.max(0, tonumber(snapshot.restorefatigue and snapshot.restorefatigue.magnitude) or 0)
+    debugState.lastRestoreEffect = {
+        id = "tracked_restore_poll",
+        name = "Tracked Restore effects",
+        qualifies = diagnostics.qualifyingSpells > 0,
+        effectId = "restorehealth/restorefatigue",
+        magnitude = rates.health + rates.fatigue,
+        healthMagnitude = rates.health,
+        fatigueMagnitude = rates.fatigue,
+        trackedSpells = diagnostics.scannedSpells,
+        qualifyingSpells = diagnostics.qualifyingSpells,
+        expiredSpells = diagnostics.expiredSpells,
+        failedChecks = diagnostics.failedChecks,
+    }
     SkillDebug.traceState("restoration","Ward restore-source poll","restore-source",{
-        activeSpell=debugState.lastRestoreEffect and debugState.lastRestoreEffect.activeSpellId,
+        activeSpell=debugState.lastRestoreEffect and debugState.lastRestoreEffect.id,
         qualifies=debugState.lastRestoreEffect and debugState.lastRestoreEffect.qualifies,
         fatiguePerSecond=rates.fatigue,
         healthPerSecond=rates.health,
+        scannedSpells=diagnostics.scannedSpells,
+        qualifyingSpells=diagnostics.qualifyingSpells,
     })
     return rates
 end
@@ -361,6 +359,17 @@ local function onSpellforgeEffectApplied(data)
     local resource = effectId == "restorehealth" and "health"
         or effectId == "restorefatigue" and "fatigue"
         or nil
+    if resource and duration > 0 then
+        restoreSpells.track({
+            id = spellId,
+            effects = {{
+                id = effectId,
+                magnitude = magnitude,
+                magnitudeMin = magnitude,
+                magnitudeMax = magnitude,
+            }},
+        })
+    end
     if not resource or duration > 0 then
         return trace:finish("duration effect authorized for active-spell polling",{
             authorizationExpires=spellforgeAuthorized[spellId],resource=resource,
@@ -673,10 +682,17 @@ return {
     engineHandlers={
         onUpdate=onUpdate,
         onConsoleCommand=onConsoleCommand,
-        onSave=function() return {states=states,sessions=attributeSessions} end,
+        onSave=function()
+            return {
+                states=states,
+                sessions=attributeSessions,
+                restoreSpells=restoreSpells.snapshotData(),
+            }
+        end,
         onLoad=function(data)
             states=(data and data.states) or states
             attributeSessions=(data and data.sessions) or {}
+            restoreSpells.restore(data and data.restoreSpells)
             WardHud.forceUpdate(getWardHudState())
         end,
     },

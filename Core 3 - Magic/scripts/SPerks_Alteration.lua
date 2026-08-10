@@ -31,6 +31,9 @@ local jumpRefundPending = nil
 local lastFatigueReduction = nil
 local pairingDiagnostics = {}
 local trackedPairingSpells = {}
+local trackedShieldSpells = Common.newTrackedSpellCache({
+    "shield","fireshield","frostshield","lightningshield",
+})
 local lastCounterweight = "No Burden rider has been attempted."
 local pairingPollCount = 0
 local pairingPollStage = "not started"
@@ -387,6 +390,9 @@ interfaces.ErnPerkFramework.registerSkillUseHandler({
         if rank("A")>0 and spell then
             trackPairingSpell(spell)
         end
+        if spell then
+            trackedShieldSpells.track(spell)
+        end
         if rank("A")>=3 and spell and burdenEffect(spell) then
             lastCounterweight=string.format(
                 "Burden cast observed: spell=%s; awaiting target-local landing.",
@@ -585,7 +591,7 @@ local function accrueForce(attack)
     local totalGain=0
     local shieldEffects,shieldDiagnostics=Common.playerSpellEffectSnapshot(self,{
         "shield","fireshield","frostshield","lightningshield",
-    })
+    },trackedShieldSpells)
     for effectId in pairs(SHIELDS) do
         local magnitude=math.max(
             0,
@@ -820,6 +826,7 @@ return {
                 pools=pools,
                 expiry=expiry,
                 trackedPairingSpells=trackedPairingSpells,
+                trackedShieldSpells=trackedShieldSpells.snapshotData(),
             }
         end,
         onLoad=function(data)
@@ -835,6 +842,7 @@ return {
             lastFatigueReduction = nil
             pairingDiagnostics = {}
             restoreTrackedPairingSpells(data and data.trackedPairingSpells)
+            trackedShieldSpells.restore(data and data.trackedShieldSpells)
             pools=(data and data.pools) or {shield=0,fireshield=0,frostshield=0,lightningshield=0}
             expiry=(data and data.expiry) or {}
         end,

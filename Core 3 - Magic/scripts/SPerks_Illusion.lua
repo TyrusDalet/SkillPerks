@@ -8,7 +8,6 @@ effects arrive through Core 0's shared landed-spell bridge.
 
 local core = require("openmw.core")
 local interfaces = require("openmw.interfaces")
-local nearby = require("openmw.nearby")
 local types = require("openmw.types")
 local self = require("openmw.self")
 
@@ -21,6 +20,7 @@ local effects = StatTracker.newActiveEffectTracker(self)
 local theftStats = StatTracker.newStatModTracker(self, "Illusion Mind Games")
 local pendingChecks, thefts = {}, {}
 local pollTimer = 0
+local passiveSpells = Common.newTrackedSpellCache({"nighteye","sanctuary"})
 
 local function rank(chain) return Common.rank(ids, chain) end
 local function hasEffect(data, id)
@@ -66,6 +66,11 @@ local function onSpellLanded(data)
     end
     if not Common.isPlayerCastLandedSpell(data) then
         return trace:reject("source is not an allowed player-cast spell")
+    end
+    for _, check in ipairs(pendingChecks) do
+        if tostring(check.spellId) == tostring(data.spellId) then
+            check.landed = true
+        end
     end
     local a=rank("A")
     local paralyze=hasEffect(data,"paralyze")
@@ -120,7 +125,7 @@ interfaces.ErnPerkFramework.registerOnHitHandler({
         local a=rank("A")
         if attack.successful ~= false then return trace:reject("attack did not miss") end
         if a < 2 then return trace:reject("A2 is not owned",{aRank=a}) end
-        local sanctuary=Common.playerSpellEffectMagnitude(self,"sanctuary")
+        local sanctuary=Common.playerSpellEffectMagnitude(self,"sanctuary",nil,passiveSpells)
         if sanctuary<=0 then return trace:reject("no qualifying player-cast Sanctuary",{magnitude=sanctuary}) end
         local resolved=Common.restoreResource(self, "fatigue", 5, ids.A2)
         trace:finish("Fatigue restored",{requested=5,resolved=resolved,sanctuary=sanctuary})
@@ -160,6 +165,9 @@ interfaces.ErnPerkFramework.registerSkillUseHandler({
             cost = event and event.cost,
             spell = event and event.spell and event.spell.id,
         })
+        if event and event.spell then
+            passiveSpells.track(event.spell)
+        end
         local b=rank("B")
         if b == 0 then return trace:reject("B chain inactive") end
         if not event.spell then return trace:reject("skill-use event has no spell") end
@@ -179,25 +187,10 @@ interfaces.ErnPerkFramework.registerSkillUseHandler({
     end,
 })
 
-local function landed(check)
-    for _, actor in ipairs(nearby.actors) do
-        for _, spell in pairs(types.Actor.activeSpells(actor)) do
-            if spell.id == check.spellId and spell.caster == self then return true end
-        end
-    end
-    return false
-end
-
 local function refreshPassives()
-    local nightEye = rank("A") >= 1 and Common.playerSpellEffectMagnitude(self, "nighteye") or 0
-    local blind = 0
-    for _, spell in pairs(types.Actor.activeSpells(self)) do
-        for _, effect in pairs(spell.effects or {}) do
-            if effect.id == "blind" then
-                blind = blind + math.max(0, tonumber(effect.magnitudeThisFrame) or 0)
-            end
-        end
-    end
+    local nightEye = rank("A") >= 1
+        and Common.playerSpellEffectMagnitude(self, "nighteye", nil, passiveSpells) or 0
+    local blind = Common.getEffectMagnitude(self, "blind")
     effects.apply("blind", nil, -math.min(math.max(0, blind), math.max(0, nightEye)))
     local c = rank("C")
     effects.apply("resistmagicka", nil, c == 2 and 20 or c == 1 and 10 or 0)
@@ -219,7 +212,7 @@ local function onUpdate(dt)
         check.nextPoll = check.nextPoll - dt
         if check.nextPoll <= 0 then
             check.nextPoll = 0.2
-            if landed(check) then
+            if check.landed then
                 local trace=SkillDebug.beginTrace("illusion","Measured Deception","landed-effect poll",{
                     elapsed=check.elapsed,spell=check.spellId,
                 })
@@ -257,10 +250,11 @@ local onConsoleCommand = SkillDebug.makeHandler({
     snapshot = function()
         return {
             string.format(
-                "Tracking: pendingChecks=%d mindThefts=%d pollTimer=%s",
+                "Tracking: pendingChecks=%d mindThefts=%d pollTimer=%s trackedPassives=%d",
                 #pendingChecks,
                 SkillDebug.count(thefts),
-                SkillDebug.number(pollTimer)
+                SkillDebug.number(pollTimer),
+                passiveSpells.count()
             ),
             "Magicka: " .. SkillDebug.resourceSummary(self, "magicka"),
         }
@@ -288,10 +282,18 @@ return {
     engineHandlers = {
         onConsoleCommand = onConsoleCommand,
         onUpdate = onUpdate,
-        onSave = function() return { effects=effects.snapshot(), stats=theftStats.snapshot(), thefts=thefts } end,
+        onSave = function()
+            return {
+                effects=effects.snapshot(),
+                stats=theftStats.snapshot(),
+                thefts=thefts,
+                passiveSpells=passiveSpells.snapshotData(),
+            }
+        end,
         onLoad = function(data)
             effects.restoreAndReverse(data and data.effects)
             theftStats.restoreAndReverse(data and data.stats)
+            passiveSpells.restore(data and data.passiveSpells)
             thefts, pendingChecks = {}, {}
         end,
     },

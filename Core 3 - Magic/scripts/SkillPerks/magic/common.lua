@@ -65,57 +65,185 @@ function Common.getEffectMagnitude(actor, effectId, extraParam)
     return ok and effect and tonumber(effect.magnitude) or 0
 end
 
+local function effectMaximum(effect)
+    return math.max(0, tonumber(
+        effect and (
+            effect.maxMagnitude or effect.magnitudeMax
+            or effect.magnitude or effect.magnitudeMin or effect.minMagnitude
+        )
+    ) or 0)
+end
+
+local function normalizeEffectIds(effectIds)
+    local requested = {}
+    for _, effectId in ipairs(effectIds or {}) do
+        requested[tostring(effectId):lower()] = true
+    end
+    return requested
+end
+
+--- Creates a cache of player-cast spell records that can be checked later via
+--- activeSpells:isSpellActive(id). This avoids repeated pairs(activeSpells)
+--- iteration in hot polling paths, which has caused native OpenMW crashes.
+--- @param effectIds table Array of lowercase magic-effect IDs to track.
+--- @return table cache Tracked-spell cache with track/snapshot helpers.
+function Common.newTrackedSpellCache(effectIds)
+    local requested = normalizeEffectIds(effectIds)
+    local trackedSpells = {}
+
+    local cache = {}
+
+    function cache.track(spell)
+        if not spell or spell.id == nil then return false end
+        local tracked = { id = tostring(spell.id), effects = {} }
+        for _, effect in pairs(spell.effects or {}) do
+            local effectId = tostring(effect.id or ""):lower()
+            if requested[effectId] then
+                local state = tracked.effects[effectId]
+                if not state then
+                    state = { present = true, maximum = 0 }
+                    tracked.effects[effectId] = state
+                end
+                state.maximum = state.maximum + effectMaximum(effect)
+            end
+        end
+        if next(tracked.effects) == nil then return false end
+        trackedSpells[tracked.id] = tracked
+        return true
+    end
+
+    function cache.snapshot(actor, wantedEffectIds)
+        local wanted = wantedEffectIds and normalizeEffectIds(wantedEffectIds) or requested
+        local result = {}
+        for effectId in pairs(wanted) do
+            result[effectId] = { magnitude = 0, present = false, maximum = 0 }
+        end
+        local diagnostics = {
+            qualifyingSpells = 0,
+            scannedSpells = 0,
+            expiredSpells = 0,
+            failedChecks = 0,
+        }
+        local activeSpells = types.Actor.activeSpells(actor)
+        local expired = {}
+        for spellId, tracked in pairs(trackedSpells) do
+            diagnostics.scannedSpells = diagnostics.scannedSpells + 1
+            local ok, active = pcall(activeSpells.isSpellActive, activeSpells, spellId)
+            if not ok then
+                diagnostics.failedChecks = diagnostics.failedChecks + 1
+            elseif active then
+                diagnostics.qualifyingSpells = diagnostics.qualifyingSpells + 1
+                for effectId, state in pairs(tracked.effects or {}) do
+                    local aggregate = result[effectId]
+                    if aggregate then
+                        aggregate.present = true
+                        aggregate.maximum = aggregate.maximum
+                            + math.max(0, tonumber(state.maximum) or 0)
+                    end
+                end
+            else
+                expired[#expired + 1] = spellId
+            end
+        end
+        for _, spellId in ipairs(expired) do
+            trackedSpells[spellId] = nil
+            diagnostics.expiredSpells = diagnostics.expiredSpells + 1
+        end
+        for effectId, state in pairs(result) do
+            if state.present and state.maximum > 0 then
+                state.magnitude = math.min(
+                    state.maximum,
+                    math.max(0, Common.getEffectMagnitude(actor, effectId))
+                )
+            end
+            state.maximum = nil
+        end
+        return result, diagnostics
+    end
+
+    function cache.magnitude(actor, effectId, extraParam)
+        local snapshot = cache.snapshot(actor, { effectId })
+        local state = snapshot[tostring(effectId):lower()]
+        if not state or not state.present then return 0 end
+        if extraParam ~= nil then
+            return Common.getEffectMagnitude(actor, effectId, extraParam)
+        end
+        return state.magnitude or 0
+    end
+
+    function cache.has(actor, effectId, extraParam)
+        local snapshot = cache.snapshot(actor, { effectId })
+        local state = snapshot[tostring(effectId):lower()]
+        if not state or not state.present then return false end
+        if extraParam ~= nil then
+            local effects = types.Actor.activeEffects(actor)
+            local ok, effect = pcall(effects.getEffect, effects, effectId, extraParam)
+            return ok and effect ~= nil
+        end
+        return true
+    end
+
+    function cache.snapshotData()
+        return trackedSpells
+    end
+
+    function cache.restore(saved)
+        trackedSpells = {}
+        for spellId, entry in pairs(saved or {}) do
+            local restored = { id = tostring(spellId), effects = {} }
+            for effectId, state in pairs(entry and entry.effects or {}) do
+                effectId = tostring(effectId):lower()
+                if requested[effectId] then
+                    restored.effects[effectId] = {
+                        present = true,
+                        maximum = math.max(0, tonumber(state and state.maximum) or 0),
+                    }
+                end
+            end
+            if next(restored.effects) ~= nil then
+                trackedSpells[restored.id] = restored
+            end
+        end
+    end
+
+    function cache.count()
+        return SkillDebug.count(trackedSpells)
+    end
+
+    return cache
+end
+
 --- Collects several qualifying player-cast effects in one active-spell pass.
 --- School scripts should use this when they need multiple effect values at
 --- once; repeatedly traversing OpenMW's live ActiveSpells collection during
 --- the same update is both expensive and unsafe while spells are changing.
 --- @param actor GameObject
 --- @param effectIds table Array of lowercase magic-effect IDs.
+--- @param tracker table|nil Optional Common.newTrackedSpellCache instance.
 --- @return table effects Values keyed by effect ID.
 --- @return table diagnostics Numbers of live and qualifying spells inspected.
-function Common.playerSpellEffectSnapshot(actor,effectIds)
+function Common.playerSpellEffectSnapshot(actor,effectIds,tracker)
+    if tracker and tracker.snapshot then
+        return tracker.snapshot(actor,effectIds)
+    end
     local requested={}
     local result={}
     for _,effectId in ipairs(effectIds or {}) do
         effectId=tostring(effectId):lower()
         requested[effectId]=true
-        result[effectId]={magnitude=0,present=false}
+        result[effectId]={
+            magnitude=Common.getEffectMagnitude(actor,effectId),
+            present=Common.getEffectMagnitude(actor,effectId)>0,
+        }
     end
-
-    local diagnostics={qualifyingSpells=0,scannedSpells=0}
-    for _,spell in pairs(types.Actor.activeSpells(actor)) do
-        diagnostics.scannedSpells=diagnostics.scannedSpells+1
-        if MagicDetection.isPlayerCastActiveSpell(actor,spell) then
-            diagnostics.qualifyingSpells=diagnostics.qualifyingSpells+1
-            for _,effect in pairs(spell.effects or {}) do
-                local effectId=tostring(effect.id or ""):lower()
-                local state=requested[effectId] and result[effectId] or nil
-                if state then
-                    state.present=true
-                    state.magnitude=state.magnitude
-                        +(tonumber(effect.magnitudeThisFrame) or 0)
-                end
-            end
-        end
-    end
-    return result,diagnostics
+    return result,{qualifyingSpells=0,scannedSpells=0,untrackedFallback=true}
 end
 
-function Common.playerSpellEffectMagnitude(actor, effectId, extraParam)
-    local total = 0
-    for _, spell in pairs(types.Actor.activeSpells(actor)) do
-        if MagicDetection.isPlayerCastActiveSpell(actor, spell) then
-            for _, effect in pairs(spell.effects or {}) do
-                if effect.id == effectId
-                        and (extraParam == nil
-                            or effect.affectedAttribute == extraParam
-                            or effect.affectedSkill == extraParam) then
-                    total = total + (tonumber(effect.magnitudeThisFrame) or 0)
-                end
-            end
-        end
+function Common.playerSpellEffectMagnitude(actor, effectId, extraParam, tracker)
+    if tracker and tracker.magnitude then
+        return tracker.magnitude(actor,effectId,extraParam)
     end
-    return total
+    return Common.getEffectMagnitude(actor,effectId,extraParam)
 end
 
 --- Tests for a qualifying player-cast effect by presence rather than numeric
@@ -124,21 +252,20 @@ end
 --- @param actor GameObject Actor whose active spells are inspected.
 --- @param effectId string Magic effect id.
 --- @param extraParam string|nil Optional affected attribute or skill.
+--- @param tracker table|nil Optional Common.newTrackedSpellCache instance.
 --- @return boolean active
-function Common.hasPlayerSpellEffect(actor, effectId, extraParam)
-    for _, spell in pairs(types.Actor.activeSpells(actor)) do
-        if MagicDetection.isPlayerCastActiveSpell(actor, spell) then
-            for _, effect in pairs(spell.effects or {}) do
-                if effect.id == effectId
-                        and (extraParam == nil
-                            or effect.affectedAttribute == extraParam
-                            or effect.affectedSkill == extraParam) then
-                    return true
-                end
-            end
-        end
+function Common.hasPlayerSpellEffect(actor, effectId, extraParam, tracker)
+    if tracker and tracker.has then
+        return tracker.has(actor,effectId,extraParam)
     end
-    return false
+    local effects = types.Actor.activeEffects(actor)
+    local ok, effect
+    if extraParam ~= nil then
+        ok, effect = pcall(effects.getEffect, effects, effectId, extraParam)
+    else
+        ok, effect = pcall(effects.getEffect, effects, effectId)
+    end
+    return ok and effect ~= nil
 end
 
 --- Shared source policy for school scripts handling target-landed effects.
