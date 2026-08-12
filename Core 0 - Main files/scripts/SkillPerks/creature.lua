@@ -210,7 +210,7 @@ end
 
 local function onUpdate(dt)
     ensurePlayerHitForwarder()
-    Stagger.checkStaggerState()
+    Stagger.checkStaggerState(dt)
     MagicTarget.onUpdate(dt)
 end
 
