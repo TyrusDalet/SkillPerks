@@ -15,6 +15,7 @@ local Common = require("scripts.SkillPerks.magic.common")
 local MagicDetection = require("scripts.SkillPerks.shared.magic_detection")
 local StatTracker = require("scripts.SkillPerks.shared.stat_tracker")
 local SkillDebug  = require("scripts.SkillPerks.shared.debug")
+local Stagger = require("scripts.SkillPerks.shared.stagger")
 
 local ids = Common.ids("mysticism")
 local effects = StatTracker.newActiveEffectTracker(self)
@@ -191,6 +192,21 @@ local function refreshHungrySoul()
     })
 end
 
+local staggerRelevantCached = nil
+
+--- Reports Mysticism's D-chain ownership to the shared Stagger module so
+--- npc.lua/creature.lua's per-frame suppression scan can skip entirely for
+--- every actor in the world when neither Telekinetic Force nor Invisible
+--- Hammer is owned (see shared/stagger.lua's PERFORMANCE NOTE). Only writes
+--- to the shared storage flag when the value actually changes.
+local function refreshStaggerRelevance()
+    local relevant = rank("D") > 0
+    if relevant ~= staggerRelevantCached then
+        staggerRelevantCached = relevant
+        Stagger.setRelevant("mysticism_d", relevant)
+    end
+end
+
 local function clear()
     effects.clearAll()
     echoedTargets = {}
@@ -198,7 +214,11 @@ end
 
 local function onUpdate(dt)
     updateTimer = updateTimer - dt
-    if updateTimer <= 0 then updateTimer = 0.2 refreshHungrySoul() end
+    if updateTimer <= 0 then
+        updateTimer = 0.2
+        refreshHungrySoul()
+        refreshStaggerRelevance()
+    end
 end
 
 -- Shows soul-echo target memory and the resources used by Mysticism riders.
